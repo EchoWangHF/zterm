@@ -401,7 +401,7 @@ class TerminalTests(unittest.TestCase):
                 pump_until(lambda: not Path(f"/proc/{remote_pid}").exists())
                 self.assertEqual(store.load(), ["dev-server"])
                 self.assertNotIn("build-server", window.groups)
-                self.assertEqual(window.header.get_title(), "SSH 工作台")
+                self.assertEqual(window.header.get_title(), "zTerm")
                 self.assertIn("选择服务器", window.quota_label.get_text())
                 window.server_list.select_row(window.rows[""])
                 self.assertEqual(window.header.get_title(), "本地终端")

@@ -1,7 +1,8 @@
-SSH 工作台
+zTerm
 
-启动：在应用菜单搜索“SSH 工作台”或“SSH Workbench”。
-命令行：~/.local/bin/ssh-workbench
+启动：在应用菜单搜索“zTerm”。
+命令行：~/.local/bin/zterm
+旧命令 ssh-workbench 仍可使用，原有服务器列表和外观配置继续保留。
 
 标题栏右上角“设置”包含“添加服务器”“导入别名”“快捷键”“外观设置”“订阅额度”。
 “设置 → 添加服务器”保存 SSH 别名，例如 dev-server。
@@ -9,7 +10,7 @@ SSH 工作台
 通配符规则不作为服务器导入，配置本身仍由 OpenSSH 完整解释。
 点击左侧服务器建立第一个会话；标签栏右侧“+”创建独立连接。
 标签显示为 [1]、[2] 等序号。窗口标题显示当前服务器 IP 或 SSH 别名，随服务器切换。
-本地会话标题为“本地终端”，欢迎页标题为“SSH 工作台”。
+本地会话标题为“本地终端”，欢迎页标题为“zTerm”。
 标题栏左侧按钮可收起/展开服务器栏，收起时保持现有连接。
 切换服务器时，之前打开的会话会继续运行。标签可拖动排序。
 会话结束后保留输出，可以点击“重新连接”。
@@ -68,6 +69,6 @@ GDK_BACKEND=x11 xvfb-run -a /usr/bin/python3 test_workbench.py
 运行方式采用 GNOME VTE spawn_async：
 https://gnome.pages.gitlab.gnome.org/vte/gtk3/method.Terminal.spawn_async.html
 
-卸载：删除 ~/.local/bin/ssh-workbench、应用数据目录 ssh-workbench/
+卸载：删除 ~/.local/bin/zterm 和 ~/.local/bin/ssh-workbench、应用数据目录 ssh-workbench/
 和 applications/local.ssh.Workbench.desktop。别名配置可按需保留。
 专属图标位于 ${XDG_DATA_HOME:-~/.local/share}/icons/hicolor/scalable/apps/local.ssh.Workbench.svg。
