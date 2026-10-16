@@ -81,7 +81,7 @@ class TerminalTests(unittest.TestCase):
         names = [family + "-" + mode for family in ("solarized", "gruvbox", "papercolor", "peaksea")
                  for mode in ("light", "dark")]
         with tempfile.TemporaryDirectory() as directory:
-            window = Window(store=AliasStore(Path(directory) / "servers.json"))
+            window = Window(enable_quota=False, store=AliasStore(Path(directory) / "servers.json"))
             dialog = None
             try:
                 for name in names:
@@ -152,7 +152,7 @@ class TerminalTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = AliasStore(Path(directory) / "servers.json")
             store.save(["dev-server"])
-            window = Window(store=store, command_factory=lambda alias: ["/bin/sh", "-c", "read line"])
+            window = Window(enable_quota=False, store=store, command_factory=lambda alias: ["/bin/sh", "-c", "read line"])
             window.confirm = lambda *args: True
             dialogs = []
             try:
@@ -217,7 +217,7 @@ class TerminalTests(unittest.TestCase):
                 window.close_window()
                 window.destroy()
                 pump_until(lambda: all(not Path(f"/proc/{pid}").exists() for pid in pids))
-                window = Window(store=store, command_factory=lambda alias: ["/bin/sh", "-c", "read line"])
+                window = Window(enable_quota=False, store=store, command_factory=lambda alias: ["/bin/sh", "-c", "read line"])
                 window.confirm = lambda *args: True
                 self.assertEqual(window.appearance, expected)
                 self.assertEqual(window.aliases, ["dev-server"])
@@ -255,7 +255,7 @@ class TerminalTests(unittest.TestCase):
             self.fail("Timed out waiting for spawn callback or child cleanup")
 
         with tempfile.TemporaryDirectory() as directory, patch.object(Session, "spawned", spawned):
-            window = Window(store=AliasStore(Path(directory) / "servers.json"),
+            window = Window(enable_quota=False, store=AliasStore(Path(directory) / "servers.json"),
                             command_factory=lambda alias: [str(Path(directory) / "missing")])
             window.confirm = lambda *args: True
             try:
@@ -286,6 +286,7 @@ class TerminalTests(unittest.TestCase):
                     context.iteration(False)
 
     def test_real_pty_tabs_reconnect_and_cleanup(self):
+        from unittest.mock import patch
         from app import Window
         from gi.repository import Gdk, GLib, Gtk, Vte
 
@@ -310,30 +311,67 @@ class TerminalTests(unittest.TestCase):
             command = ["/bin/sh", "-c",
                        "printf 'READY\\n'; while IFS= read -r line; do "
                        "[ \"$line\" = exit ] && exit 7; printf 'REPLY=%s\\n' \"$line\"; done"]
-            window = Window(store=store, command_factory=lambda alias: command)
+            window = Window(enable_quota=False, store=store, command_factory=lambda alias: command)
             window.confirm = lambda *args: True
             try:
                 self.assertEqual(window.groups, {}, "Startup must not connect automatically")
+                menu_items = window.settings_menu.get_children()
+                self.assertEqual([item.get_label() for item in menu_items],
+                                 ["添加服务器", "导入别名", "快捷键", "外观设置", "订阅额度"])
+                for item, method in zip(menu_items[:3], ("add_dialog", "import_aliases", "show_shortcuts")):
+                    with patch.object(window, method) as action:
+                        item.activate()
+                        action.assert_called_once_with()
+                with patch("app.AppearanceDialog") as appearance:
+                    menu_items[3].activate()
+                    appearance.assert_called_once_with(window)
                 window.server_list.select_row(window.rows["dev-server"])
                 first = window.groups["dev-server"].get_nth_page(0)
                 pump_until(lambda: first.alive and "READY" in output(first))
+                self.assertEqual(first.tab_label.get_text(), "[1]")
+                self.assertEqual(window.header.get_title(), "dev-server")
+                self.assertEqual(window.get_title(), "dev-server")
                 first.terminal.feed_child(b"hello-terminal\n")
                 pump_until(lambda: "REPLY=hello-terminal" in output(first))
-                second = window.new_session()
+                group = window.groups["dev-server"]
+                group.get_action_widget(Gtk.PackType.END).clicked()
+                second = group.get_nth_page(1)
                 pump_until(lambda: second.alive)
+                self.assertEqual(second.tab_label.get_text(), "[2]")
+                pids_before_toggle = (first.pid, second.pid)
+                original_width = first.terminal.get_allocated_width()
+                window.sidebar_toggle.set_active(False)
+                pump_until(lambda: not window.sidebar.get_visible()
+                           and first.terminal.get_allocated_width() > original_width)
+                window.sidebar_toggle.set_active(True)
+                pump_until(lambda: window.sidebar.get_visible()
+                           and first.terminal.get_allocated_width() == original_width)
+                self.assertEqual((first.pid, second.pid), pids_before_toggle)
                 window.server_list.select_row(window.rows["build-server"])
+                self.assertEqual(window.header.get_title(), "build-server")
                 remote = window.groups["build-server"].get_nth_page(0)
                 pump_until(lambda: remote.alive)
                 window.server_list.select_row(window.rows["dev-server"])
                 self.assertIs(window.stack.get_visible_child(), window.groups["dev-server"])
+                # A late response from another server must never replace the visible account.
+                window.quota_received("dev-server", {
+                    "codex": {"windows": [{"label": "5h", "used": 24, "reset": time.time() + 3600}]}})
+                window.quota_received("build-server", {
+                    "codex": {"message": "OTHER-SERVER"}})
+                self.assertIn("24%", window.quota_label.get_text())
+                self.assertNotIn("OTHER-SERVER", window.quota_label.get_text())
                 self.assertTrue(first.alive and second.alive and remote.alive)
                 self.assertEqual(window.groups["dev-server"].get_n_pages(), 2)
                 first.terminal.feed_child(b"exit\n")
                 pump_until(lambda: not first.active)
                 self.assertIn("退出码 7", first.status.get_text())
+                self.assertEqual(first.tab_label.get_text(), "[1] · 已结束")
                 self.assertIn("REPLY=hello-terminal", output(first))
                 first.start()
                 pump_until(lambda: first.alive)
+                self.assertEqual(first.tab_label.get_text(), "[1]")
+                self.assertEqual(window.header.get_title(), "dev-server")
+                self.assertEqual(window.get_title(), "dev-server")
                 window.confirm = lambda *args: False
                 window.close_session(second)
                 self.assertEqual(window.groups["dev-server"].get_n_pages(), 2)
@@ -343,7 +381,7 @@ class TerminalTests(unittest.TestCase):
                 pump_until(lambda: not Path(f"/proc/{second_pid}").exists())
                 self.assertEqual(window.groups["dev-server"].get_n_pages(), 1)
                 for _ in range(3):
-                    window.new_session()
+                    group.get_action_widget(Gtk.PackType.END).clicked()
                 pump_until(lambda: all(page.alive for page in window.groups["dev-server"].get_children()))
                 window.groups["dev-server"].set_current_page(0)
                 # Screenshot contains simulated sessions only, never user data.
@@ -354,6 +392,8 @@ class TerminalTests(unittest.TestCase):
                     context.iteration(False)
                 pixbuf = Gdk.pixbuf_get_from_window(window.get_window(), 0, 0,
                                                    window.get_allocated_width(), window.get_allocated_height())
+                self.assertFalse(first.tab_label.get_layout().is_ellipsized(),
+                                 "A normal server name and session number must be visible")
                 pixbuf.savev(str(Path(__file__).parent / "preview.png"), "png", [], [])
                 remote_pid = remote.pid
                 window.server_list.select_row(window.rows["build-server"])
@@ -361,6 +401,12 @@ class TerminalTests(unittest.TestCase):
                 pump_until(lambda: not Path(f"/proc/{remote_pid}").exists())
                 self.assertEqual(store.load(), ["dev-server"])
                 self.assertNotIn("build-server", window.groups)
+                self.assertEqual(window.header.get_title(), "SSH 工作台")
+                self.assertIn("选择服务器", window.quota_label.get_text())
+                window.server_list.select_row(window.rows[""])
+                self.assertEqual(window.header.get_title(), "本地终端")
+                local = window.groups[""].get_nth_page(0)
+                pump_until(lambda: local.alive)
                 self.assertTrue(first.alive)
                 pids = [page.pid for group in window.groups.values() for page in group.get_children()]
                 self.assertFalse(window.close_window())

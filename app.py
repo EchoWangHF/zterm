@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import pwd
 import sys
+import threading
+import time
 
 import gi
 
@@ -15,6 +17,7 @@ from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango, Vte
 
 from model import (AliasStore, AppearanceStore, THEMES,
                    default_appearance, discover_aliases, ssh_command, valid_alias)
+from quota import fetch as fetch_quota, display as display_quota
 
 
 def button(label, callback, tooltip=None):
@@ -143,7 +146,12 @@ class Session(Gtk.Box):
         self.pending = False
         self.closed = False
         self.pid = None
-        self.tab_label = Gtk.Label(label=str(number))
+        self.tab_title = f"[{number}]"
+        self.tab_label = Gtk.Label(label=self.tab_title)
+        self.tab_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        self.tab_label.set_width_chars(min(len(self.tab_title), 32))
+        self.tab_label.set_max_width_chars(32)
+        self.tab_label.set_tooltip_text(self.tab_title)
         self.terminal = Vte.Terminal()
         self.terminal.set_scrollback_lines(20000)
         self.terminal.set_scroll_on_keystroke(True)
@@ -182,7 +190,7 @@ class Session(Gtk.Box):
         self.pid = None
         self.cancel = Gio.Cancellable()
         self.status.set_text("正在启动 " + (self.alias or "本地终端") + "…")
-        self.tab_label.set_text(str(self.number))
+        self.tab_label.set_text(self.tab_title)
         self.reconnect.set_sensitive(False)
         env = dict(os.environ, TERM="xterm-256color", COLORTERM="truecolor")
         try:
@@ -199,7 +207,7 @@ class Session(Gtk.Box):
             return
         if error:
             self.status.set_text("启动失败：" + error.message)
-            self.tab_label.set_text(f"{self.number} · 失败")
+            self.tab_label.set_text(self.tab_title + " · 失败")
             self.reconnect.set_sensitive(True)
         else:
             self.pid = pid
@@ -214,11 +222,12 @@ class Session(Gtk.Box):
             return
         code = os.waitstatus_to_exitcode(status)
         self.status.set_text(f"会话已结束 · 退出码 {code} · 输出已保留")
-        self.tab_label.set_text(f"{self.number} · 已结束")
+        self.tab_label.set_text(self.tab_title + " · 已结束")
         self.reconnect.set_sensitive(True)
 
     def title_changed(self, terminal):
-        self.tab_label.set_tooltip_text(terminal.get_window_title() or self.alias or "本地终端")
+        title = terminal.get_window_title()
+        self.tab_label.set_tooltip_text(self.tab_title + ("\n" + title if title else ""))
 
     def context_menu(self, terminal, event):
         if event.button != 3:
@@ -242,7 +251,7 @@ class Session(Gtk.Box):
 
 
 class Window(Gtk.ApplicationWindow):
-    def __init__(self, application=None, store=None, command_factory=None):
+    def __init__(self, application=None, store=None, command_factory=None, enable_quota=True):
         super().__init__(application=application, title="SSH 工作台")
         self.set_default_size(1120, 720)
         self.set_wmclass("ssh-workbench", "SSH Workbench")
@@ -258,26 +267,56 @@ class Window(Gtk.ApplicationWindow):
         self.command_factory = command_factory or self.default_command
         self.groups, self.rows, self.counters = {}, {}, {}
         self.current = None
+        self.quota_enabled = enable_quota
+        self.quota_cache = {}
+        self.quota_busy = False
+        self.quota_closed = False
         self.load_error = None
         try:
             self.aliases = self.store.load()
         except (OSError, ValueError) as error:
             self.aliases = []
             self.load_error = str(error)
-        header = Gtk.HeaderBar(title="SSH 工作台", subtitle="服务器与会话")
+        header = Gtk.HeaderBar(title="SSH 工作台")
+        self.header = header
         header.set_show_close_button(True)
-        header.pack_start(button("添加服务器", lambda _: self.add_dialog(), "保存一个 SSH 别名"))
-        header.pack_start(button("导入别名", lambda _: self.import_aliases(), "读取 ~/.ssh/config 中的 Host 别名"))
-        header.pack_end(button("外观设置", lambda _: AppearanceDialog(self), "字体、字号与终端配色"))
-        header.pack_end(button("快捷键", lambda _: self.info(
-            "快捷键", "Ctrl+Shift+T：新会话\nCtrl+Shift+W：关闭会话\n"
-            "Ctrl+Shift+C / V：复制 / 粘贴\nAlt+1 … 9：切换会话\n"
-            "Ctrl+PageUp / PageDown：切换会话\nCtrl+加号 / 减号 / 0：字体缩放")))
+        self.sidebar_toggle = Gtk.ToggleButton(active=True)
+        self.sidebar_toggle.set_image(Gtk.Image.new_from_icon_name("view-sidebar-symbolic", Gtk.IconSize.BUTTON))
+        self.sidebar_toggle.set_tooltip_text("收起服务器栏")
+        self.sidebar_toggle.get_accessible().set_name("展开或收起服务器栏")
+        header.pack_start(self.sidebar_toggle)
+        self.settings_button = Gtk.MenuButton(label="设置")
+        self.settings_menu = Gtk.Menu()
+        for label, callback in [("添加服务器", lambda _: self.add_dialog()),
+                                ("导入别名", lambda _: self.import_aliases()),
+                                ("快捷键", lambda _: self.show_shortcuts()),
+                                ("外观设置", lambda _: AppearanceDialog(self)),
+                                ("订阅额度", lambda _: self.quota_settings())]:
+            item = Gtk.MenuItem(label=label)
+            item.connect("activate", callback)
+            self.settings_menu.append(item)
+        self.settings_menu.show_all()
+        self.settings_button.set_popup(self.settings_menu)
+        header.pack_end(self.settings_button)
         self.set_titlebar(header)
         pane = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        self.pane = pane
+        self.sidebar_width = 220
         pane.set_position(220)
-        self.add(pane)
+        layout = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.add(layout)
+        layout.pack_start(pane, True, True, 0)
+        quota_bar = Gtk.Box(spacing=8, margin=6)
+        self.quota_label = Gtk.Label(label="选择服务器后显示 Codex 订阅额度")
+        self.quota_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self.quota_label.set_justify(Gtk.Justification.CENTER)
+        quota_bar.set_center_widget(self.quota_label)
+        self.quota_refresh = button("↻", lambda _: self.refresh_quota(force=True), "刷新当前服务器订阅额度")
+        self.quota_refresh.set_relief(Gtk.ReliefStyle.NONE)
+        quota_bar.pack_end(self.quota_refresh, False, False, 0)
+        layout.pack_end(quota_bar, False, False, 0)
         side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=10)
+        self.sidebar = side
         side.set_size_request(170, -1)
         side.pack_start(Gtk.Label(label="服务器", xalign=0), False, False, 4)
         self.search = Gtk.SearchEntry(placeholder_text="搜索 SSH 别名")
@@ -295,14 +334,6 @@ class Window(Gtk.ApplicationWindow):
         self.remove_button.set_sensitive(False)
         side.pack_end(self.remove_button, False, False, 0)
         pane.pack1(side, False, False)
-        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        toolbar = Gtk.Box(spacing=8, margin=8)
-        self.server_title = Gtk.Label(label="选择服务器开始连接", xalign=0)
-        toolbar.pack_start(self.server_title, True, True, 0)
-        self.new_button = button("＋ 新会话", lambda _: self.new_session(), "Ctrl+Shift+T")
-        self.new_button.set_sensitive(False)
-        toolbar.pack_end(self.new_button, False, False, 0)
-        right.pack_start(toolbar, False, False, 0)
         self.stack = Gtk.Stack()
         welcome = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
         welcome.set_valign(Gtk.Align.CENTER)
@@ -310,24 +341,108 @@ class Window(Gtk.ApplicationWindow):
         welcome.pack_start(Gtk.Image.new_from_pixbuf(
             self.get_icon().scale_simple(64, 64, GdkPixbuf.InterpType.BILINEAR)), False, False, 0)
         welcome.pack_start(Gtk.Label(label="你的服务器，一个工作台"), False, False, 0)
-        welcome.pack_start(Gtk.Label(label="添加 SSH 别名，或从 ~/.ssh/config 导入。\n"
-                                    "选择服务器后，用顶部 ＋ 打开更多会话。\n"
+        welcome.pack_start(Gtk.Label(label="在右上角“设置”中添加服务器或导入 SSH 别名。\n"
+                                    "选择服务器后，用标签栏右侧 ＋ 打开更多会话。\n"
                                     "切换服务器会保留当前连接。", justify=Gtk.Justification.CENTER), False, False, 0)
         self.stack.add_named(welcome, "welcome")
-        right.pack_start(self.stack, True, True, 0)
-        pane.pack2(right, True, False)
+        pane.pack2(self.stack, True, False)
         self.add_row("")
         for alias in self.aliases:
             self.add_row(alias)
         self.connect("key-press-event", self.key_pressed)
         self.connect("delete-event", self.close_window)
         self.show_all()
+        side.set_no_show_all(True)
+        self.sidebar_toggle.connect("toggled", self.toggle_sidebar)
         self.server_list.unselect_all()
         self.stack.set_visible_child_name("welcome")
+        self.connect("destroy", self.stop_quota)
+        self.quota_timer = GLib.timeout_add_seconds(30, self.quota_tick) if enable_quota else None
         if self.load_error:
             GLib.idle_add(self.info, "读取配置失败", self.load_error)
         if self.appearance_error:
             GLib.idle_add(self.info, "读取外观配置失败", self.appearance_error)
+
+    def toggle_sidebar(self, toggle):
+        visible = toggle.get_active()
+        if not visible:
+            self.sidebar_width = self.pane.get_position()
+        self.sidebar.set_visible(visible)
+        if visible:
+            self.pane.set_position(self.sidebar_width)
+        toggle.set_tooltip_text("收起服务器栏" if visible else "展开服务器栏")
+
+    def stop_quota(self, *_):
+        self.quota_closed = True
+        if self.quota_timer is not None:
+            GLib.source_remove(self.quota_timer)
+            self.quota_timer = None
+
+    def quota_tick(self):
+        self.render_quota()
+        self.refresh_quota()
+        return True
+
+    def render_quota(self):
+        if self.current is None:
+            self.quota_label.set_text("选择服务器后显示 Codex 订阅额度")
+            self.quota_label.set_tooltip_text(None)
+            return
+        record = self.quota_cache.get(self.current)
+        server = self.current or "本地终端"
+        if record is None:
+            text = "Codex · 正在查询 " + server
+        elif "error" in record:
+            text = "Codex · " + record["error"]
+        else:
+            text = display_quota("Codex", record["codex"])
+        self.quota_label.set_text(text)
+        details = [server, text, "使用比例；重置时间按本机时区显示。每 5 分钟自动查询，也可点击 ↻。"]
+        if record:
+            observed = record.get("codex", {}).get("observed")
+            if observed:
+                details.append("数据时间：" + time.strftime("%m-%d %H:%M:%S", time.localtime(observed)))
+        self.quota_label.set_tooltip_text("\n".join(details))
+
+    def refresh_quota(self, force=False):
+        if not self.quota_enabled or self.current is None or self.quota_busy or self.quota_closed:
+            return
+        alias = self.current
+        record = self.quota_cache.get(alias)
+        if not force and record and time.time() - record["fetched"] < 300:
+            return
+        self.quota_busy = True
+        self.quota_refresh.set_sensitive(False)
+
+        def work():
+            result = fetch_quota(alias)
+            if not self.quota_closed:
+                GLib.idle_add(self.quota_received, alias, result)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def quota_received(self, alias, result):
+        if self.quota_closed:
+            return False
+        self.quota_busy = False
+        self.quota_refresh.set_sensitive(True)
+        result["fetched"] = time.time()
+        self.quota_cache[alias] = result
+        self.render_quota()
+        self.refresh_quota()
+        return False
+
+    def quota_settings(self):
+        self.info("Codex 订阅额度", "底栏显示当前所选机器上的 Codex 订阅使用比例和重置时间。\n"
+                  "请在该机器安装 codex CLI，并使用订阅账号登录。\n"
+                  "远端查询需要 Python 3.9+ 和免交互 SSH 登录（如密钥或 agent）。\n"
+                  "每 5 分钟自动刷新，也可点击底栏右侧 ↻。\n"
+                  "重置时间按本机时区显示，悬停可查看数据时间。")
+
+    def show_shortcuts(self):
+        self.info("快捷键", "Ctrl+Shift+T：新会话\nCtrl+Shift+W：关闭会话\n"
+                  "Ctrl+Shift+C / V：复制 / 粘贴\nAlt+1 … 9：切换会话\n"
+                  "Ctrl+PageUp / PageDown：切换会话\nCtrl+加号 / 减号 / 0：字体缩放")
 
     def set_appearance(self, settings):
         self.appearance = settings.copy()
@@ -426,11 +541,18 @@ class Window(Gtk.ApplicationWindow):
         if row is None:
             return
         self.current = row.alias
-        self.server_title.set_text(row.alias or "本地终端")
+        self.update_server_title()
+        self.render_quota()
+        self.refresh_quota()
         self.remove_button.set_sensitive(bool(row.alias))
-        self.new_button.set_sensitive(True)
         if row.alias not in self.groups:
             notebook = Gtk.Notebook(scrollable=True)
+            add = button("+", lambda _: self.new_session(), "新会话 · Ctrl+Shift+T")
+            add.set_relief(Gtk.ReliefStyle.NONE)
+            add.set_focus_on_click(False)
+            add.get_accessible().set_name("新会话")
+            notebook.set_action_widget(add, Gtk.PackType.END)
+            add.show()
             notebook.connect("switch-page", lambda _, page, index: GLib.idle_add(page.terminal.grab_focus))
             self.groups[row.alias] = notebook
             self.counters[row.alias] = 0
@@ -463,6 +585,11 @@ class Window(Gtk.ApplicationWindow):
         session.terminal.grab_focus()
         return session
 
+    def update_server_title(self):
+        title = "SSH 工作台" if self.current is None else self.current or "本地终端"
+        self.header.set_title(title)
+        self.set_title(title)
+
     def close_session(self, session):
         if session.active and not self.confirm("关闭会话？", "此会话仍在运行。关闭会终止连接及终端内的前台任务。"):
             return
@@ -489,9 +616,9 @@ class Window(Gtk.ApplicationWindow):
             notebook.destroy()
             del self.groups[alias]
         self.stack.set_visible_child_name("welcome")
-        self.server_title.set_text("选择服务器开始连接")
-        self.new_button.set_sensitive(False)
         self.remove_button.set_sensitive(False)
+        self.update_server_title()
+        self.render_quota()
 
     def close_window(self, *_):
         sessions = [session for group in self.groups.values() for session in group.get_children()]

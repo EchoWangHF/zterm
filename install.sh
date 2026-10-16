@@ -6,7 +6,9 @@ app_dir="$data_dir/ssh-workbench"
 bin_dir="$HOME/.local/bin"
 icon_dir="$data_dir/icons/hicolor"
 install -d "$app_dir" "$data_dir/applications" "$bin_dir" "$icon_dir/scalable/apps"
-install -m 644 "$source_dir/app.py" "$source_dir/model.py" "$source_dir/HELP.txt" "$source_dir/THEME_SOURCES.txt" "$source_dir/workbench.svg" "$app_dir/"
+install -m 644 "$source_dir/app.py" "$source_dir/model.py" "$source_dir/quota.py" \
+    "$source_dir/HELP.txt" "$source_dir/THEME_SOURCES.txt" "$source_dir/workbench.svg" \
+    "$source_dir/LICENSE" "$source_dir/THIRD_PARTY_NOTICES.txt" "$app_dir/"
 install -m 644 "$source_dir/workbench.svg" "$icon_dir/scalable/apps/local.ssh.Workbench.svg"
 # The launcher resolves XDG_DATA_HOME at runtime, including paths with spaces.
 cat > "$bin_dir/ssh-workbench" <<'LAUNCHER'
