@@ -16,13 +16,14 @@ cat > "$bin_dir/ssh-workbench" <<'LAUNCHER'
 exec /usr/bin/python3 "${XDG_DATA_HOME:-$HOME/.local/share}/ssh-workbench/app.py" "$@"
 LAUNCHER
 chmod 755 "$bin_dir/ssh-workbench"
+install -m 755 "$bin_dir/ssh-workbench" "$bin_dir/zterm"
 cat > "$data_dir/applications/local.ssh.Workbench.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
-Name=SSH Workbench
-Name[zh_CN]=SSH 工作台
+Name=zTerm
+Name[zh_CN]=zTerm
 Comment=SSH servers and per-server terminal sessions
-Exec="$bin_dir/ssh-workbench"
+Exec="$bin_dir/zterm"
 Icon=local.ssh.Workbench
 Terminal=false
 Categories=System;TerminalEmulator;Network;
@@ -32,4 +33,4 @@ DESKTOP
 if command -v gtk-update-icon-cache >/dev/null 2>&1; then
     gtk-update-icon-cache -f -t "$icon_dir"
 fi
-printf 'Installed: %s\n' "$bin_dir/ssh-workbench"
+printf 'Installed: %s\n' "$bin_dir/zterm"

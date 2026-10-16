@@ -1,8 +1,8 @@
-# term — SSH 工作台
+# zTerm
 
 基于 Python、GTK 3 和 VTE 的独立终端应用，支持本地终端与按服务器分组的 SSH 会话。
 
-[下载 deb 安装包](https://github.com/zhouyawei1994/term/releases/latest) · [GPL-3.0 许可证](LICENSE)
+[下载 deb 安装包](https://github.com/zhou411X/zTerm/releases/latest) · [GPL-3.0 许可证](LICENSE)
 
 - 保存或导入 SSH 别名，连接选项由系统 OpenSSH 和 `~/.ssh/config` 管理。
 - 每个服务器拥有独立会话标签，切换服务器保留连接；支持重连及关闭确认。
@@ -16,23 +16,23 @@
 适用于提供 GTK 3 / VTE 的 Linux 桌面。已在 Ubuntu 24.04、Python 3.12、VTE 0.76 上验证。
 需要图形桌面环境；其他 Debian / Ubuntu 版本尚未逐一验证。
 
-从 [Releases](https://github.com/zhouyawei1994/term/releases) 下载
-`ssh-workbench_0.2.0_all.deb`，进入下载目录后安装：
+从 [Releases](https://github.com/zhou411X/zTerm/releases) 下载
+`zterm_0.2.1_all.deb`，进入下载目录后安装：
 
 ```sh
-sudo apt install ./ssh-workbench_0.2.0_all.deb
-/usr/bin/ssh-workbench
+sudo apt install ./zterm_0.2.1_all.deb
+/usr/bin/zterm
 ```
 
 也支持 `dpkg -i`；如果提示缺少依赖，随后用 apt 补齐：
 
 ```sh
-sudo dpkg -i ./ssh-workbench_0.2.0_all.deb
+sudo dpkg -i ./zterm_0.2.1_all.deb
 # 仅当上一步报告缺少依赖时执行：
 sudo apt --fix-broken install
 ```
 
-也可在应用菜单搜索“SSH 工作台”或“SSH Workbench”。升级使用同样的安装命令，
+也可在应用菜单搜索“zTerm”。升级使用同样的安装命令，
 之后重新打开应用；已有窗口不会自动加载新版。Release 同时提供 `SHA256SUMS`，
 与 deb 放在同一目录后可运行 `sha256sum -c SHA256SUMS` 校验下载内容。
 
@@ -43,8 +43,8 @@ sudo apt --fix-broken install
 ```sh
 sudo apt update
 sudo apt install git python3 python3-gi gir1.2-gtk-3.0 gir1.2-vte-2.91 librsvg2-common openssh-client
-git clone https://github.com/zhouyawei1994/term.git
-cd term
+git clone https://github.com/zhou411X/zTerm.git
+cd zTerm
 /usr/bin/python3 app.py
 ```
 
@@ -53,12 +53,16 @@ cd term
 
 ```sh
 sh install.sh
-~/.local/bin/ssh-workbench
+~/.local/bin/zterm
 ```
 
 用户级安装文件位于 `${XDG_DATA_HOME:-~/.local/share}/ssh-workbench/`，
 设置位于 `${XDG_CONFIG_HOME:-~/.config}/ssh-workbench/`。服务器别名和外观分别保存在
 `servers.json` 和 `appearance.json`；SSH 密钥、用户、端口等仍由 OpenSSH 配置管理。
+
+从 SSH 工作台升级：应用现名 zTerm，启动命令为 `zterm`；旧命令 `ssh-workbench`
+仍可使用。沿用原来的数据目录、配置目录和桌面入口标识，服务器列表和外观设置无需迁移。
+deb 包名从 `ssh-workbench` 改为 `zterm`，安装新版时替换旧包。
 
 ## 构建 deb 安装包
 
@@ -69,18 +73,18 @@ sudo apt install dpkg
 # Python 语法编译检查；不会生成本机架构专用的可执行程序。
 /usr/bin/python3 -m py_compile app.py model.py quota.py
 sh build_deb.sh
-sudo apt install ./dist/ssh-workbench_0.2.0_all.deb
+sudo apt install ./dist/zterm_0.2.1_all.deb
 ```
 
-可通过 `sh build_deb.sh 0.2.1` 指定版本。安装包为 `Architecture: all`，
+可通过 `sh build_deb.sh 0.2.2` 指定版本。安装包为 `Architecture: all`，
 包含 Python 源码、桌面入口和图标，运行依赖由 apt 安装。
-系统版启动命令为 `/usr/bin/ssh-workbench`，程序放在 `/usr/share/ssh-workbench/`，
-文档放在 `/usr/share/doc/ssh-workbench/`，继续使用原有用户配置。
+系统版启动命令为 `/usr/bin/zterm`，程序放在 `/usr/share/ssh-workbench/`，
+文档放在 `/usr/share/doc/zterm/`，继续使用原有用户配置。
 
 如果此前运行过 `install.sh`，用户级启动器和桌面入口仍优先于系统版；
-可先通过 `/usr/bin/ssh-workbench` 明确启动 deb 版。安装包不会删除用户级安装。
-卸载系统版使用 `sudo apt remove ssh-workbench`，用户配置保留。
-用户级安装可删除对应的 `~/.local/bin/ssh-workbench`、上述应用数据目录，
+可先通过 `/usr/bin/zterm` 明确启动 deb 版。安装包不会删除用户级安装。
+卸载系统版使用 `sudo apt remove zterm`，用户配置保留。
+用户级安装可删除对应的 `~/.local/bin/zterm` 和 `~/.local/bin/ssh-workbench`、上述应用数据目录，
 以及用户数据目录下的 `applications/local.ssh.Workbench.desktop` 和
 `icons/hicolor/scalable/apps/local.ssh.Workbench.svg`；保留配置目录即可保留设置。
 
@@ -113,6 +117,6 @@ GDK_BACKEND=x11 xvfb-run -a /usr/bin/python3 test_workbench.py
 
 ## 开源许可
 
-Copyright (c) 2026 zhouyawei1994。项目以 **GPL-3.0-only** 发布，完整条款见 [LICENSE](LICENSE)。
+Copyright (c) 2026 zhou411X。项目以 **GPL-3.0-only** 发布，完整条款见 [LICENSE](LICENSE)。
 配色适配保留上游作者和许可声明，见 [THIRD_PARTY_NOTICES.txt](THIRD_PARTY_NOTICES.txt)。
 安装包包含程序源码和许可文本；每个 Release 的对应源码可通过同名 Git 标签获取。

@@ -3,7 +3,7 @@
 set -eu
 umask 022
 source_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-version=${1:-0.2.0}
+version=${1:-0.2.1}
 dpkg --validate-version "$version"
 case "$version" in
     *[!0-9A-Za-z.+:~\-]*) echo 'Invalid package version' >&2; exit 1 ;;
@@ -12,7 +12,7 @@ stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT HUP INT TERM
 chmod 755 "$stage"
 app_dir="$stage/usr/share/ssh-workbench"
-doc_dir="$stage/usr/share/doc/ssh-workbench"
+doc_dir="$stage/usr/share/doc/zterm"
 install -d "$stage/DEBIAN" "$stage/usr/bin" "$app_dir" "$doc_dir" \
     "$stage/usr/share/applications" "$stage/usr/share/icons/hicolor/scalable/apps"
 install -m 644 "$source_dir/app.py" "$source_dir/model.py" "$source_dir/quota.py" "$source_dir/workbench.svg" "$app_dir/"
@@ -26,13 +26,14 @@ cat > "$stage/usr/bin/ssh-workbench" <<'LAUNCHER'
 exec /usr/bin/python3 /usr/share/ssh-workbench/app.py "$@"
 LAUNCHER
 chmod 755 "$stage/usr/bin/ssh-workbench"
+install -m 755 "$stage/usr/bin/ssh-workbench" "$stage/usr/bin/zterm"
 cat > "$stage/usr/share/applications/local.ssh.Workbench.desktop" <<'DESKTOP'
 [Desktop Entry]
 Type=Application
-Name=SSH Workbench
-Name[zh_CN]=SSH 工作台
+Name=zTerm
+Name[zh_CN]=zTerm
 Comment=SSH servers and per-server terminal sessions
-Exec=/usr/bin/ssh-workbench
+Exec=/usr/bin/zterm
 Icon=local.ssh.Workbench
 Terminal=false
 Categories=System;TerminalEmulator;
@@ -40,18 +41,21 @@ StartupNotify=true
 StartupWMClass=ssh-workbench
 DESKTOP
 cat > "$stage/DEBIAN/control" <<CONTROL
-Package: ssh-workbench
+Package: zterm
 Version: $version
 Section: utils
 Priority: optional
 Architecture: all
+Provides: ssh-workbench (= $version)
+Conflicts: ssh-workbench
+Replaces: ssh-workbench
 Maintainer: zhouyawei <185499624@qq.com>
 Depends: python3 (>= 3.9), python3-gi, gir1.2-gtk-3.0, gir1.2-vte-2.91, librsvg2-common, openssh-client
-Homepage: https://github.com/zhouyawei1994/term
-Description: GTK terminal with grouped SSH sessions
+Homepage: https://github.com/zhou411X/zTerm
+Description: zTerm terminal with grouped SSH sessions
  Independent local and SSH terminal with a collapsible server sidebar,
  per-server session tabs, configurable fonts and eight named color themes.
 CONTROL
 # dpkg records root ownership; the staging directory remains user-owned.
 install -d "$source_dir/dist"
-dpkg-deb --root-owner-group --build "$stage" "$source_dir/dist/ssh-workbench_${version}_all.deb"
+dpkg-deb --root-owner-group --build "$stage" "$source_dir/dist/zterm_${version}_all.deb"

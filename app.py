@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""SSH Workbench — a GTK/VTE terminal with per-server session tabs."""
+"""zTerm — a GTK/VTE terminal with per-server session tabs."""
 
 import os
 from pathlib import Path
@@ -252,7 +252,7 @@ class Session(Gtk.Box):
 
 class Window(Gtk.ApplicationWindow):
     def __init__(self, application=None, store=None, command_factory=None, enable_quota=True):
-        super().__init__(application=application, title="SSH 工作台")
+        super().__init__(application=application, title="zTerm")
         self.set_default_size(1120, 720)
         self.set_wmclass("ssh-workbench", "SSH Workbench")
         self.set_icon_from_file(str(Path(__file__).with_name("workbench.svg")))
@@ -277,7 +277,7 @@ class Window(Gtk.ApplicationWindow):
         except (OSError, ValueError) as error:
             self.aliases = []
             self.load_error = str(error)
-        header = Gtk.HeaderBar(title="SSH 工作台")
+        header = Gtk.HeaderBar(title="zTerm")
         self.header = header
         header.set_show_close_button(True)
         self.sidebar_toggle = Gtk.ToggleButton(active=True)
@@ -586,7 +586,7 @@ class Window(Gtk.ApplicationWindow):
         return session
 
     def update_server_title(self):
-        title = "SSH 工作台" if self.current is None else self.current or "本地终端"
+        title = "zTerm" if self.current is None else self.current or "本地终端"
         self.header.set_title(title)
         self.set_title(title)
 
@@ -623,7 +623,7 @@ class Window(Gtk.ApplicationWindow):
     def close_window(self, *_):
         sessions = [session for group in self.groups.values() for session in group.get_children()]
         count = sum(session.active for session in sessions)
-        if count and not self.confirm("关闭 SSH 工作台？", f"还有 {count} 个活动会话，关闭窗口将终止这些会话。"):
+        if count and not self.confirm("关闭 zTerm？", f"还有 {count} 个活动会话，关闭窗口将终止这些会话。"):
             return True
         for session in sessions:
             session.dispose()
@@ -667,6 +667,7 @@ class Window(Gtk.ApplicationWindow):
 
 class Application(Gtk.Application):
     def __init__(self):
+        GLib.set_application_name("zTerm")
         super().__init__(application_id="local.ssh.Workbench", flags=Gio.ApplicationFlags.FLAGS_NONE)
 
     def do_activate(self):

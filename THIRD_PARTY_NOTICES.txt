@@ -1,5 +1,5 @@
-term / SSH Workbench
-Copyright (c) 2026 zhouyawei1994
+zTerm
+Copyright (c) 2026 zhou411X
 SPDX-License-Identifier: GPL-3.0-only
 Full license: LICENSE
 
