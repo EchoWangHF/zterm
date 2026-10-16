@@ -165,14 +165,7 @@ class Session(Gtk.Box):
         body.pack_start(Gtk.Scrollbar(orientation=Gtk.Orientation.VERTICAL,
                                      adjustment=self.terminal.get_vadjustment()), False, False, 0)
         self.pack_start(body, True, True, 0)
-        self.footer = Gtk.Box(spacing=10, margin=6)
-        self.status = Gtk.Label(label="正在启动…", xalign=0)
-        self.status.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
-        self.footer.pack_start(self.status, True, True, 0)
-        self.reconnect = button("重新连接" if alias else "重新打开", lambda _: self.start())
-        self.reconnect.set_sensitive(False)
-        self.footer.pack_end(self.reconnect, False, False, 0)
-        self.pack_end(self.footer, False, False, 0)
+        self.status_detail = "正在启动…"
         self.terminal.connect("child-exited", self.exited)
         self.terminal.connect("window-title-changed", self.title_changed)
         self.terminal.connect("button-press-event", self.context_menu)
@@ -189,9 +182,9 @@ class Session(Gtk.Box):
         self.pending = True
         self.pid = None
         self.cancel = Gio.Cancellable()
-        self.status.set_text("正在启动 " + (self.alias or "本地终端") + "…")
+        self.status_detail = "正在启动 " + (self.alias or "本地终端") + "…"
         self.tab_label.set_text(self.tab_title)
-        self.reconnect.set_sensitive(False)
+        self.window.render_status()
         env = dict(os.environ, TERM="xterm-256color", COLORTERM="truecolor")
         try:
             self.terminal.spawn_async(
@@ -206,14 +199,14 @@ class Session(Gtk.Box):
         if self.closed:
             return
         if error:
-            self.status.set_text("启动失败：" + error.message)
+            self.status_detail = "启动失败：" + error.message
             self.tab_label.set_text(self.tab_title + " · 失败")
-            self.reconnect.set_sensitive(True)
         else:
             self.pid = pid
             self.alive = True
-            self.status.set_text((self.alias or "本地终端") + " · 会话运行中")
+            self.status_detail = (self.alias or "本地终端") + " · 会话运行中"
             terminal.grab_focus()
+        self.window.render_status()
 
     def exited(self, terminal, status):
         self.alive = self.pending = False
@@ -221,9 +214,9 @@ class Session(Gtk.Box):
         if self.closed:
             return
         code = os.waitstatus_to_exitcode(status)
-        self.status.set_text(f"会话已结束 · 退出码 {code} · 输出已保留")
+        self.status_detail = f"会话已结束 · 退出码 {code} · 输出已保留"
         self.tab_label.set_text(self.tab_title + " · 已结束")
-        self.reconnect.set_sensitive(True)
+        self.window.render_status()
 
     def title_changed(self, terminal):
         title = terminal.get_window_title()
@@ -248,6 +241,148 @@ class Session(Gtk.Box):
         self.cancel.cancel()
         # Destroying the terminal releases its PTY and hangs up the child.
         self.destroy()
+
+
+class SessionNotebook(Gtk.Notebook):
+    """Native session pages with a scrollable, sequential tab-and-add strip."""
+
+    def __init__(self, new_session):
+        super().__init__(show_tabs=False, show_border=False)
+        self.tabs = {}
+        self.tab_css = Gtk.CssProvider()
+        self.tab_css.load_from_data(b"""
+            .session-tab {
+                border: 1px solid alpha(@theme_fg_color, 0.18);
+                border-radius: 5px 5px 0 0;
+                background-color: alpha(@theme_fg_color, 0.04);
+            }
+            .session-tab.active {
+                background-color: @theme_base_color;
+                border-bottom-color: @theme_selected_bg_color;
+                box-shadow: inset 0 -2px @theme_selected_bg_color;
+            }
+            .session-tab-select, .session-tab-close {
+                background: none;
+                border: none;
+                box-shadow: none;
+            }
+            .session-tab-close {
+                min-width: 24px;
+                min-height: 24px;
+                padding: 0;
+            }
+            .session-tab-close:hover {
+                background-color: alpha(@theme_fg_color, 0.12);
+            }
+        """)
+        self.panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.tab_strip = Gtk.Box(spacing=3)
+        self.tab_scroll = Gtk.ScrolledWindow()
+        self.tab_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
+        self.tab_scroll.add(self.tab_strip)
+        self.panel.pack_start(self.tab_scroll, False, False, 0)
+        self.panel.pack_start(self, True, True, 0)
+        self.add_button = button("+", lambda _: new_session(), "新会话 · Ctrl+Shift+T")
+        self.add_button.set_relief(Gtk.ReliefStyle.NONE)
+        self.add_button.set_focus_on_click(False)
+        self.add_button.get_accessible().set_name("新会话")
+        self.tab_strip.pack_start(self.add_button, False, False, 0)
+        self.drag_target = Gtk.TargetEntry.new(
+            f"application/x-zterm-tab-{id(self)}", Gtk.TargetFlags.SAME_APP, 0)
+        self.connect("switch-page", self.page_selected)
+        self.connect("page-removed", self.page_removed)
+        self.connect("page-reordered", self.page_reordered)
+        self.tab_strip.connect("size-allocate", lambda *_: self.reveal_current())
+        self.tab_scroll.get_hadjustment().connect("changed", lambda *_: self.reveal_current())
+
+    def add_tab(self, session, close_session):
+        row = Gtk.Box()
+        row.set_size_request(160, -1)
+        select = Gtk.ToggleButton()
+        select.set_relief(Gtk.ReliefStyle.NONE)
+        select.set_focus_on_click(False)
+        select.add(session.tab_label)
+        select.connect("clicked", self.select_clicked, session)
+        close = button("×", lambda _: close_session(session), "关闭会话")
+        close.set_relief(Gtk.ReliefStyle.NONE)
+        close.set_focus_on_click(False)
+        close.set_margin_start(4)
+        close.set_margin_end(5)
+        close.set_margin_top(4)
+        close.set_margin_bottom(4)
+        for widget, css_class in ((row, "session-tab"), (select, "session-tab-select"),
+                                  (close, "session-tab-close")):
+            style = widget.get_style_context()
+            style.add_class(css_class)
+            style.add_provider(self.tab_css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        row.pack_start(select, True, True, 0)
+        row.pack_end(close, False, False, 0)
+        self.tabs[session] = (row, select)
+        self.tab_strip.pack_start(row, False, False, 0)
+        self.tab_strip.reorder_child(self.add_button, -1)
+        select.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, [self.drag_target], Gdk.DragAction.MOVE)
+        select.drag_dest_set(Gtk.DestDefaults.ALL, [self.drag_target], Gdk.DragAction.MOVE)
+        select.connect("drag-data-get", lambda widget, context, data, info, timestamp:
+                       data.set(data.get_target(), 8, str(session.number).encode()))
+        select.connect("drag-data-received", self.tab_dropped, session)
+        row.show_all()
+        self.sync_selection(self.get_nth_page(self.get_current_page()))
+
+    def select_session(self, session):
+        self.set_current_page(self.page_num(session))
+        self.sync_selection(session)
+        session.terminal.grab_focus()
+
+    def sync_selection(self, current):
+        for session, (row, select) in self.tabs.items():
+            active = session is current
+            style = row.get_style_context()
+            if active:
+                style.add_class("active")
+            else:
+                style.remove_class("active")
+            # set_active emits clicked, so block our selection handler while syncing.
+            if select.get_active() != active:
+                select.handler_block_by_func(self.select_clicked)
+                select.set_active(active)
+                select.handler_unblock_by_func(self.select_clicked)
+
+    def select_clicked(self, widget, session):
+        self.select_session(session)
+
+    def page_selected(self, notebook, page, index):
+        self.sync_selection(page)
+        GLib.idle_add(self.reveal_current)
+        GLib.idle_add(page.terminal.grab_focus)
+
+    def reveal_current(self):
+        current = self.get_nth_page(self.get_current_page())
+        if current not in self.tabs:
+            return False
+        row = self.tabs[current][0]
+        x, _ = row.translate_coordinates(self.tab_strip, 0, 0)
+        end = x + row.get_allocated_width()
+        if self.page_num(current) == self.get_n_pages() - 1:
+            add_x, _ = self.add_button.translate_coordinates(self.tab_strip, 0, 0)
+            end = add_x + self.add_button.get_allocated_width()
+        self.tab_scroll.get_hadjustment().clamp_page(x, end)
+        return False
+
+    def page_removed(self, notebook, session, index):
+        row, select = self.tabs.pop(session)
+        row.destroy()
+
+    def page_reordered(self, notebook, session, index):
+        self.tab_strip.reorder_child(self.tabs[session][0], index)
+        self.tab_strip.reorder_child(self.add_button, -1)
+        self.reveal_current()
+
+    def tab_dropped(self, widget, context, x, y, data, info, timestamp, target):
+        number = bytes(data.get_data()).decode("ascii")
+        source = next((session for session in self.tabs if str(session.number) == number), None)
+        if source is not None:
+            self.reorder_child(source, self.page_num(target))
+        Gtk.drag_finish(context, source is not None, False, timestamp)
 
 
 class Window(Gtk.ApplicationWindow):
@@ -306,15 +441,26 @@ class Window(Gtk.ApplicationWindow):
         layout = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.add(layout)
         layout.pack_start(pane, True, True, 0)
-        quota_bar = Gtk.Box(spacing=8, margin=6)
+        self.status_bar = Gtk.Box(spacing=8, margin=6)
+        connection = Gtk.Box(spacing=4)
+        self.connection_label = Gtk.Label(label="未选择服务器", xalign=0)
+        self.connection_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        self.connection_label.set_max_width_chars(24)
+        connection.pack_start(self.connection_label, False, False, 0)
+        self.reconnect = button("重新连接", lambda _: self.reconnect_current())
+        self.reconnect.set_relief(Gtk.ReliefStyle.NONE)
+        self.reconnect.set_no_show_all(True)
+        connection.pack_start(self.reconnect, False, False, 0)
+        self.status_bar.pack_start(connection, False, False, 0)
         self.quota_label = Gtk.Label(label="选择服务器后显示 Codex 订阅额度")
         self.quota_label.set_ellipsize(Pango.EllipsizeMode.END)
+        self.quota_label.set_max_width_chars(55)
         self.quota_label.set_justify(Gtk.Justification.CENTER)
-        quota_bar.set_center_widget(self.quota_label)
+        self.status_bar.set_center_widget(self.quota_label)
         self.quota_refresh = button("↻", lambda _: self.refresh_quota(force=True), "刷新当前服务器订阅额度")
         self.quota_refresh.set_relief(Gtk.ReliefStyle.NONE)
-        quota_bar.pack_end(self.quota_refresh, False, False, 0)
-        layout.pack_end(quota_bar, False, False, 0)
+        self.status_bar.pack_end(self.quota_refresh, False, False, 0)
+        layout.pack_end(self.status_bar, False, False, 0)
         side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=10)
         self.sidebar = side
         side.set_size_request(170, -1)
@@ -342,7 +488,7 @@ class Window(Gtk.ApplicationWindow):
             self.get_icon().scale_simple(64, 64, GdkPixbuf.InterpType.BILINEAR)), False, False, 0)
         welcome.pack_start(Gtk.Label(label="你的服务器，一个工作台"), False, False, 0)
         welcome.pack_start(Gtk.Label(label="在右上角“设置”中添加服务器或导入 SSH 别名。\n"
-                                    "选择服务器后，用标签栏右侧 ＋ 打开更多会话。\n"
+                                    "选择服务器后，用最后一个标签后的 ＋ 打开更多会话。\n"
                                     "切换服务器会保留当前连接。", justify=Gtk.Justification.CENTER), False, False, 0)
         self.stack.add_named(welcome, "welcome")
         pane.pack2(self.stack, True, False)
@@ -377,6 +523,35 @@ class Window(Gtk.ApplicationWindow):
         if self.quota_timer is not None:
             GLib.source_remove(self.quota_timer)
             self.quota_timer = None
+
+    def current_session(self):
+        notebook = self.groups.get(self.current)
+        return notebook.get_nth_page(notebook.get_current_page()) if notebook else None
+
+    def render_status(self, session=None):
+        session = session or self.current_session()
+        server = self.current or "本地终端"
+        if session is None:
+            text = "未选择服务器" if self.current is None else server + " · 无会话"
+            detail = None
+        else:
+            state = "正在连接…" if session.pending else "在线" if session.alive else ""
+            text = server + " · " + state
+            detail = session.status_detail
+        self.connection_label.set_text(text)
+        self.connection_label.set_tooltip_text(detail or text)
+        self.reconnect.set_label("重新连接" if self.current else "重新打开")
+        self.reconnect.set_tooltip_text(detail)
+        self.reconnect.set_visible(session is not None and not session.active)
+
+    def reconnect_current(self):
+        session = self.current_session()
+        if session is not None:
+            session.start()
+
+    def session_switched(self, notebook, page, index, alias):
+        if alias == self.current:
+            self.render_status(page)
 
     def quota_tick(self):
         self.render_quota()
@@ -546,24 +721,20 @@ class Window(Gtk.ApplicationWindow):
         self.refresh_quota()
         self.remove_button.set_sensitive(bool(row.alias))
         if row.alias not in self.groups:
-            notebook = Gtk.Notebook(scrollable=True)
-            add = button("+", lambda _: self.new_session(), "新会话 · Ctrl+Shift+T")
-            add.set_relief(Gtk.ReliefStyle.NONE)
-            add.set_focus_on_click(False)
-            add.get_accessible().set_name("新会话")
-            notebook.set_action_widget(add, Gtk.PackType.END)
-            add.show()
-            notebook.connect("switch-page", lambda _, page, index: GLib.idle_add(page.terminal.grab_focus))
+            notebook = SessionNotebook(self.new_session)
+            notebook.connect_after("switch-page", self.session_switched, row.alias)
+            notebook.connect_after("page-removed", lambda *_: self.render_status())
             self.groups[row.alias] = notebook
             self.counters[row.alias] = 0
-            self.stack.add_named(notebook, "server:" + row.alias)
-            notebook.show()
+            self.stack.add_named(notebook.panel, "server:" + row.alias)
+            notebook.panel.show_all()
         notebook = self.groups[row.alias]
-        self.stack.set_visible_child(notebook)
+        self.stack.set_visible_child(notebook.panel)
         if notebook.get_n_pages() == 0:
             self.new_session()
         else:
             notebook.get_nth_page(notebook.get_current_page()).terminal.grab_focus()
+        self.render_status()
 
     def new_session(self):
         if self.current is None:
@@ -572,16 +743,10 @@ class Window(Gtk.ApplicationWindow):
         self.counters[alias] += 1
         session = Session(self, alias, self.counters[alias], self.command_factory(alias))
         notebook = self.groups[alias]
-        tab = Gtk.Box(spacing=8)
-        tab.pack_start(session.tab_label, True, True, 4)
-        close = button("×", lambda _: self.close_session(session), "关闭会话")
-        close.set_relief(Gtk.ReliefStyle.NONE)
-        close.set_focus_on_click(False)
-        tab.pack_end(close, False, False, 0)
-        tab.show_all()
-        index = notebook.append_page(session, tab)
-        notebook.set_tab_reorderable(session, True)
+        index = notebook.append_page(session, None)
+        notebook.add_tab(session, self.close_session)
         notebook.set_current_page(index)
+        self.render_status()
         session.terminal.grab_focus()
         return session
 
@@ -613,12 +778,13 @@ class Window(Gtk.ApplicationWindow):
         if notebook:
             for session in sessions:
                 session.dispose()
-            notebook.destroy()
+            notebook.panel.destroy()
             del self.groups[alias]
         self.stack.set_visible_child_name("welcome")
         self.remove_button.set_sensitive(False)
         self.update_server_title()
         self.render_quota()
+        self.render_status()
 
     def close_window(self, *_):
         sessions = [session for group in self.groups.values() for session in group.get_children()]
