@@ -90,25 +90,31 @@ def save_json(path, data):
             os.unlink(temporary)
 
 
-LEGACY_THEMES = {
-    "classic": {"name": "经典紫", "foreground": "#eeeeec", "background": "#241f31",
-                "cursor": "#eeeeec"},
-    "dark": {"name": "深色", "foreground": "#e5e7eb", "background": "#15181e",
-             "cursor": "#93c5fd"},
-    "light": {"name": "浅色", "foreground": "#24292f", "background": "#fafafa",
-              "cursor": "#0969da"},
-    "ocean": {"name": "深海蓝", "foreground": "#d8e7f3", "background": "#102332",
-              "cursor": "#7dd3fc"},
-}
+# GNOME Terminal 3.52 schema defaults as shipped in Ubuntu 24.04.
+GNOME_PALETTE = ["#171421", "#c01c28", "#26a269", "#a2734c", "#12488b", "#a347ba", "#2aa1b3", "#d0cfcc",
+                 "#5e5c64", "#f66151", "#33da7a", "#e9ad0c", "#2a7bde", "#c061cb", "#33c7de", "#ffffff"]
 
-DARK_PALETTE = ["#2e3436", "#ef5350", "#8bc34a", "#fdd835", "#64b5f6", "#ce93d8", "#4dd0e1", "#d3d7cf",
-                "#888a85", "#ff8a80", "#b9f6a5", "#ffff8d", "#90caf9", "#ea80fc", "#84ffff", "#ffffff"]
-LIGHT_PALETTE = ["#24292f", "#b42318", "#27632a", "#805700", "#1755ad", "#8039a4", "#006b75", "#6e7781",
-                 "#57606a", "#cf222e", "#1a7f37", "#9a6700", "#0969da", "#8250df", "#087e8b", "#8c959f"]
+# Removed presets are only recognized for migration, never offered in the UI.
+LEGACY_THEME_MIGRATIONS = {
+    "classic": ("ubuntu-default", ("#eeeeec", "#241f31", "#eeeeec")),
+    "dark": ("gnome-gray-on-black", ("#e5e7eb", "#15181e", "#93c5fd")),
+    "light": ("gnome-black-on-white", ("#24292f", "#fafafa", "#0969da")),
+    "ocean": ("ubuntu-default", ("#d8e7f3", "#102332", "#7dd3fc")),
+}
 
 # RGB sources and ANSI adaptation details are recorded in THEME_SOURCES.txt.
 # Solarized follows the local Vim variant, including its experimental green.
 THEMES = {
+    **{key: {"name": name, "foreground": fg, "background": bg, "cursor": fg,
+             "palette": GNOME_PALETTE.copy()}
+       for key, name, fg, bg in (
+           ("gnome-black-on-light-yellow", "浅黄背景黑字", "#000000", "#ffffdd"),
+           ("gnome-black-on-white", "白底黑字", "#000000", "#ffffff"),
+           ("gnome-gray-on-black", "黑底灰字", "#aaaaaa", "#000000"),
+           ("gnome-white-on-black", "黑底白字", "#ffffff", "#000000"),
+           ("gnome-green-on-black", "黑底绿字", "#00ff00", "#000000"),
+           ("ubuntu-default", "Ubuntu 默认（李子色）", "#ffffff", "#300a24"),
+       )},
     "solarized-light": {
         "name": "Solarized Light", "foreground": "#657b83", "background": "#fdf6e3", "cursor": "#657b83",
         "palette": ["#eee8d5", "#dc322f", "#719e07", "#b58900", "#268bd2", "#d33682", "#2aa198", "#073642",
@@ -149,14 +155,39 @@ THEMES = {
         "palette": ["#202020", "#f08060", "#60f080", "#e0c060", "#80c0e0", "#f0c0f0", "#c0d8f8", "#d0d0d0",
                     "#b0b0b0", "#f08060", "#60f080", "#e0c060", "#80c0e0", "#f0c0f0", "#c0d8f8", "#d0d0d0"],
     },
-    **{key: {**theme, "palette": LIGHT_PALETTE if key == "light" else DARK_PALETTE}
-       for key, theme in LEGACY_THEMES.items()},
 }
 
 
+INTERFACE_THEMES = {"follow-terminal": "跟随终端配色（推荐）", "system": "跟随系统外观",
+                    **{key: theme["name"] for key, theme in THEMES.items()}}
+
+
+def blend_colors(background, foreground, amount):
+    return "#" + "".join(f"{round(bg + (fg - bg) * amount):02x}"
+                         for bg, fg in zip(bytes.fromhex(background[1:]), bytes.fromhex(foreground[1:])))
+
+
+def interface_colors(settings):
+    name = settings.get("interface_theme", "follow-terminal")
+    if name == "system":
+        return None
+    if name == "follow-terminal":
+        name = settings["theme"]
+    theme = THEMES[name]
+    background = theme["background"]
+    foreground = "#d0d0d0" if name == "gnome-green-on-black" else theme["foreground"]
+    accent = ("#e95420" if name == "ubuntu-default" else
+              "#00af00" if name == "gnome-green-on-black" else theme["palette"][4])
+    return {"background": background, "foreground": foreground, "accent": accent,
+            "surface": blend_colors(background, foreground, 0.06),
+            "hover": blend_colors(background, foreground, 0.12),
+            "border": blend_colors(background, foreground, 0.25),
+            "selection": blend_colors(background, accent, 0.25)}
+
+
 def default_appearance():
-    return {"font": "Monospace 11", "theme": "classic",
-            **{key: THEMES["classic"][key] for key in ("foreground", "background", "cursor")}}
+    return {"font": "Monospace 11", "theme": "ubuntu-default", "interface_theme": "follow-terminal",
+            **{key: THEMES["ubuntu-default"][key] for key in ("foreground", "background", "cursor")}}
 
 
 class AppearanceStore:
@@ -167,12 +198,21 @@ class AppearanceStore:
     def validate(self, data):
         if (not isinstance(data, dict)
                 or not isinstance(data.get("font"), str) or not data["font"].strip()
-                or not isinstance(data.get("theme"), str) or data["theme"] not in THEMES
+                or not isinstance(data.get("theme"), str)
+                or data["theme"] not in THEMES.keys() | LEGACY_THEME_MIGRATIONS.keys()
+                or not isinstance(data.get("interface_theme", "follow-terminal"), str)
+                or data.get("interface_theme", "follow-terminal") not in INTERFACE_THEMES
                 or any(not isinstance(data.get(key), str)
                        or not re.fullmatch(r"#[0-9a-fA-F]{6}", data[key])
                        for key in ("foreground", "background", "cursor"))):
             raise ValueError("外观配置格式错误；请检查 " + str(self.path))
-        return data
+        if data["theme"] in LEGACY_THEME_MIGRATIONS:
+            theme, previous_colors = LEGACY_THEME_MIGRATIONS[data["theme"]]
+            data = dict(data, theme=theme)
+            for key, previous in zip(("foreground", "background", "cursor"), previous_colors):
+                if data[key].lower() == previous:
+                    data[key] = THEMES[theme][key]
+        return dict(data, interface_theme=data.get("interface_theme", "follow-terminal"))
 
     def load(self):
         if not self.path.exists():
