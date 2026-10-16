@@ -1,0 +1,39 @@
+终端主题来源与映射（2026-10-16）
+
+主题是打包的 RGB 快照，不在启动时执行或修改 Vim 配置。
+所有 palette 数组按 ANSI 0–15 排列；只设置这 16 色，保留 VTE 的其余
+256 色与 truecolor 行为。字体、字号、自定义文字/背景/光标色仍单独保存。
+
+Solarized Light / Dark
+本机：~/.vim_runtime/sources_non_forked/vim-colors-solarized/colors/solarized.vim
+RGB 定义在 245–261 行，16 色索引在 285–300 行，明暗反转在 379–391 行。
+使用本机 GUI RGB 值，包括实验绿色 #719e07，不改成其他版本的 #859900。
+Light 将八种 base 色按本机 light 分支反转；文字和光标均取 base0。
+项目：https://github.com/altercation/vim-colors-solarized
+
+Gruvbox Light / Dark
+本机：~/.vim_runtime/sources_non_forked/gruvbox/colors/gruvbox.vim
+使用默认 medium 对比度、Normal 的 fg1/bg0 和 274 行起的 terminal_color_0–15。
+光标使用前景色；普通色为 neutral，亮色采用 light 的 faded / dark 的 bright。
+项目：https://github.com/morhetz/gruvbox
+
+PaperColor Light / Dark
+经用户确认使用官方完整主题；本机只找到 lightline 状态栏版本。
+来源：https://github.com/NLKNguyen/papercolor-theme/blob/master/colors/PaperColor.vim
+使用 default.light/default.dark 的 color00–color15 原始顺序作为终端 16 色，
+前景取 color07，背景取 color00，光标取 cursor_bg。
+不是较旧 papercolor-16 仓库中的 Base16 变体，也不是 lightline 状态栏配色。
+
+Peaksea Light / Dark
+本机：~/.vim_runtime/sources_forked/peaksea/colors/peaksea.vim
+使用 LIGHT / DARK COLOR DEFINE 段中的 GUI RGB，Normal 和 Cursor 分别提供
+前景、背景和光标颜色。原文件没有独立的 terminal_color_0–15 数组。
+ANSI 映射依据本机 16 色 cterm 段的组名：
+  0=Normal.bg，1=Error.fg，2=PreProc.fg，3=Special.fg，
+  4=Constant.fg，5=Identifier.fg，6=Statement.fg，7=Normal.fg，
+  8=LineNr.fg，9–14 分别复用 1–6，15=Normal.fg。
+亮色复用原主题对应颜色，不凭空增亮；Light 同样沿用这些组名映射。
+这属于将 Vim 主题适配到终端 ANSI 的约定，并非原作者提供的终端预设。
+项目：https://www.vim.org/scripts/script.php?script_id=760
+
+原有 classic/dark/light/ocean 标识及配色保留，兼容已保存的外观配置。

@@ -1,0 +1,57 @@
+SSH 工作台
+
+启动：在应用菜单搜索“SSH 工作台”或“SSH Workbench”。
+命令行：~/.local/bin/ssh-workbench
+
+左侧“添加服务器”保存 SSH 别名，例如 dev-server。
+“导入别名”读取 ~/.ssh/config 中明确的 Host 别名及 Include 文件。
+通配符规则不作为服务器导入，配置本身仍由 OpenSSH 完整解释。
+点击左侧服务器建立第一个会话；右上方“＋ 新会话”创建独立连接。
+切换服务器时，之前打开的会话会继续运行。标签可拖动排序。
+会话结束后保留输出，可以点击“重新连接”。
+“移除服务器”仅移除工作台保存的别名，不修改 SSH 配置。
+关闭活动会话、服务器或窗口时会提示确认。
+重启工作台会保留服务器列表，但不会自动恢复 SSH 连接。
+
+外观设置：
+点击标题栏“外观设置”，在“字体与字号”中选择已安装的字体、字形和大小。
+支持 Solarized、Gruvbox、PaperColor、Peaksea 各自的 Light / Dark 配色，
+包含各主题的 ANSI 16 色；原有经典紫、深色、浅色、深海蓝仍保留。
+也可分别设置文字、背景和光标颜色。来源与适配说明见 THEME_SOURCES.txt。
+切换主题会恢复该主题的预设颜色；之后可以继续自定义颜色。
+对话框下方实时预览。“保存并应用”同时更新所有会话并保存设置，新会话和重启后均沿用。
+“取消”不改变会话或已保存配置；“恢复默认”先更新预览，保存后才生效。
+保存外观会将各会话的临时字体缩放重置为 100%；之后仍可用快捷键缩放。
+主题只改变终端内容区的配色。外观配置与服务器列表分别保存。
+
+SSH 连接使用 /usr/bin/ssh，用户名、密钥、端口、跳板机等均遵循
+系统 SSH 配置。密码和首次连接的主机确认直接在终端内处理。
+本应用不保存密码。若尚未定义别名，可自行在 ~/.ssh/config 添加：
+
+Host dev-server
+    HostName 192.0.2.10
+    User your-user
+
+别名列表：${XDG_CONFIG_HOME:-~/.config}/ssh-workbench/servers.json
+外观配置：${XDG_CONFIG_HOME:-~/.config}/ssh-workbench/appearance.json
+程序文件：${XDG_DATA_HOME:-~/.local/share}/ssh-workbench/
+
+快捷键：
+Ctrl+Shift+T             新会话
+Ctrl+Shift+W             关闭当前会话
+Ctrl+Shift+C / V         复制 / 粘贴
+Alt+1 … 9               按位置切换标签
+Ctrl+PageUp / PageDown   前后切换标签
+Ctrl+加号 / 减号 / 0     放大 / 缩小 / 重置字体
+
+开发验证：
+/usr/bin/python3 -m py_compile app.py model.py test_workbench.py
+GDK_BACKEND=x11 xvfb-run -a /usr/bin/python3 test_workbench.py
+
+依赖：python3-gi、gir1.2-gtk-3.0、gir1.2-vte-2.91、openssh-client。
+运行方式采用 GNOME VTE spawn_async：
+https://gnome.pages.gitlab.gnome.org/vte/gtk3/method.Terminal.spawn_async.html
+
+卸载：删除 ~/.local/bin/ssh-workbench、应用数据目录 ssh-workbench/
+和 applications/local.ssh.Workbench.desktop。别名配置可按需保留。
+专属图标位于 ${XDG_DATA_HOME:-~/.local/share}/icons/hicolor/scalable/apps/local.ssh.Workbench.svg。
