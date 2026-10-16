@@ -1,0 +1,56 @@
+term / SSH Workbench
+Copyright (c) 2026 zhouyawei1994
+SPDX-License-Identifier: GPL-3.0-only
+Full license: LICENSE
+
+Theme adaptations
+=================
+The application includes RGB palette snapshots and terminal mappings, not the
+upstream Vim scripts. The original authors and upstream licenses are retained
+below. Mapping details and source locations are in THEME_SOURCES.txt.
+
+Solarized
+Copyright (c) 2011 Ethan Schoonover
+License: MIT (text below)
+https://github.com/altercation/vim-colors-solarized/blob/master/README.mkd
+
+Gruvbox
+Author: morhetz <morhetz@gmail.com>
+License: MIT/X11 (text below; the upstream README states MIT/X11)
+https://github.com/morhetz/gruvbox/blob/master/README.md
+
+PaperColor
+Copyright (c) 2015-2020 Nikyle Nguyen
+License: MIT (text below)
+https://github.com/NLKNguyen/papercolor-theme/blob/master/LICENSE
+
+MIT permission notice for Solarized, Gruvbox and PaperColor
+--------------------------------------------------------
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+Peaksea
+-------
+Author: Pan Shizhu
+License: GPL v3, as declared by the original project's Google Code archive.
+Full license text is included in LICENSE.
+https://www.vim.org/scripts/script.php?script_id=760
+https://storage.googleapis.com/google-code-archive/v2/code.google.com/peaksea/project.json
+
+GTK, VTE, PyGObject and OpenSSH are runtime dependencies supplied separately by
+the operating system. Their upstream licenses continue to apply to them.
