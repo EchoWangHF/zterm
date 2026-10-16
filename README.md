@@ -1,8 +1,8 @@
-# zTerm
+# zterm
 
-基于 Python、GTK 3 和 VTE 的独立终端应用，支持本地终端与按服务器分组的 SSH 会话。
+zterm 项目的应用显示名为 **zTerm**，是基于 Python、GTK 3 和 VTE 的独立终端应用，支持本地终端与按服务器分组的 SSH 会话。
 
-[下载 deb 安装包](https://github.com/zhou411X/zTerm/releases/latest) · [GPL-3.0 许可证](LICENSE)
+[下载 deb 安装包](https://github.com/zhou411X/zterm/releases/latest) · [GPL-3.0 许可证](LICENSE)
 
 - 保存或导入 SSH 别名，连接选项由系统 OpenSSH 和 `~/.ssh/config` 管理。
 - 每个服务器拥有独立会话标签，切换服务器保留连接；支持重连及关闭确认。
@@ -17,7 +17,7 @@
 适用于提供 GTK 3 / VTE 的 Linux 桌面。已在 Ubuntu 24.04、Python 3.12、VTE 0.76 上验证。
 需要图形桌面环境；其他 Debian / Ubuntu 版本尚未逐一验证。
 
-从 [Releases](https://github.com/zhou411X/zTerm/releases) 下载
+从 [Releases](https://github.com/zhou411X/zterm/releases) 下载
 `zterm_0.2.2_all.deb`，进入下载目录后安装：
 
 ```sh
@@ -44,8 +44,8 @@ sudo apt --fix-broken install
 ```sh
 sudo apt update
 sudo apt install git python3 python3-gi gir1.2-gtk-3.0 gir1.2-vte-2.91 librsvg2-common openssh-client
-git clone https://github.com/zhou411X/zTerm.git
-cd zTerm
+git clone https://github.com/zhou411X/zterm.git
+cd zterm
 /usr/bin/python3 app.py
 ```
 

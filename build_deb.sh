@@ -51,7 +51,7 @@ Conflicts: ssh-workbench
 Replaces: ssh-workbench
 Maintainer: zhouyawei <185499624@qq.com>
 Depends: python3 (>= 3.9), python3-gi, gir1.2-gtk-3.0, gir1.2-vte-2.91, librsvg2-common, openssh-client
-Homepage: https://github.com/zhou411X/zTerm
+Homepage: https://github.com/zhou411X/zterm
 Description: zTerm terminal with grouped SSH sessions
  Independent local and SSH terminal with a collapsible server sidebar,
  per-server session tabs, configurable fonts and eight named color themes.
