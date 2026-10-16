@@ -73,6 +73,103 @@ class ModelTests(unittest.TestCase):
 
 
 class TerminalTests(unittest.TestCase):
+    def test_inline_add_tracks_tabs_reordering_overflow_and_empty_group(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from app import SessionNotebook
+        from gi.repository import GLib, Gtk
+
+        context = GLib.MainContext.default()
+
+        def pump_until(predicate):
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                while context.pending():
+                    context.iteration(False)
+                if predicate():
+                    return
+                time.sleep(0.01)
+            self.fail("Tab strip did not reach the expected layout")
+
+        counter = 0
+
+        def add_page():
+            nonlocal counter
+            counter += 1
+            page = Gtk.Box()
+            page.number = counter
+            page.tab_label = Gtk.Label(label=f"[{counter}]")
+            page.terminal = Gtk.Entry()
+            page.add(page.terminal)
+            page.show_all()
+            index = group.append_page(page, None)
+            group.add_tab(page, lambda session: session.destroy())
+            group.set_current_page(index)
+
+        group = SessionNotebook(add_page)
+        window = Gtk.Window(default_width=480, default_height=200)
+        window.add(group.panel)
+        window.show_all()
+        try:
+            group.add_button.clicked()
+            group.add_button.clicked()
+            first, second = group.get_children()
+
+            def inline_gap():
+                last = group.get_nth_page(group.get_n_pages() - 1)
+                row = group.tabs[last][0]
+                right = row.translate_coordinates(group.tab_strip, row.get_allocated_width(), 0)[0]
+                return group.add_button.translate_coordinates(group.tab_strip, 0, 0)[0] - right
+
+            pump_until(lambda: 0 <= inline_gap() <= 6)
+            self.assertLess(group.add_button.translate_coordinates(window, 0, 0)[0], 400)
+            for page in (first, second):
+                row, select = group.tabs[page]
+                close = row.get_children()[1]
+                self.assertGreaterEqual(row.get_allocated_width(), 160)
+                self.assertGreater(select.get_allocated_width(), close.get_allocated_width() * 3)
+                close_right = close.translate_coordinates(row, close.get_allocated_width(), 0)[0]
+                self.assertGreaterEqual(row.get_allocated_width() - close_right, 0)
+                self.assertLessEqual(row.get_allocated_width() - close_right, 8)
+            group.tabs[first][1].clicked()
+            self.assertIs(group.get_nth_page(group.get_current_page()), first)
+            self.assertEqual(group.get_n_pages(), 2, "Selecting a tab must not close it")
+            self.assertTrue(group.tabs[first][0].get_style_context().has_class("active"))
+            self.assertFalse(group.tabs[second][0].get_style_context().has_class("active"))
+            group.tabs[first][1].clicked()
+            self.assertTrue(group.tabs[first][1].get_active(), "Clicking the active tab must keep it selected")
+            data = SimpleNamespace(get_data=lambda: str(second.number).encode())
+            with patch("app.Gtk.drag_finish") as finish:
+                group.tab_dropped(group.tabs[first][1], object(), 0, 0, data, 0, 0, first)
+                self.assertTrue(finish.call_args.args[1])
+            self.assertIs(group.get_nth_page(0), second)
+            self.assertEqual(group.tab_strip.get_children(),
+                             [group.tabs[second][0], group.tabs[first][0], group.add_button])
+            pump_until(lambda: 0 <= inline_gap() <= 6)
+
+            for _ in range(15):
+                group.add_button.clicked()
+            adjustment = group.tab_scroll.get_hadjustment()
+            pump_until(lambda: adjustment.get_upper() > adjustment.get_page_size()
+                       and group.add_button.translate_coordinates(group.tab_scroll, 0, 0)[0]
+                       + group.add_button.get_allocated_width() <= group.tab_scroll.get_allocated_width())
+            self.assertLessEqual(window.get_allocated_width(), 500, "Tabs must scroll instead of widening the window")
+            group.set_current_page(0)
+            pump_until(lambda: adjustment.get_value() == 0)
+            last = group.get_nth_page(group.get_n_pages() - 1)
+            group.tabs[last][0].get_children()[1].clicked()
+            pump_until(lambda: 0 <= inline_gap() <= 6)
+            for page in group.get_children():
+                page.destroy()
+            pump_until(lambda: group.get_n_pages() == 0 and group.add_button.get_mapped())
+            self.assertEqual(group.tab_strip.get_children(), [group.add_button])
+            group.add_button.clicked()
+            self.assertEqual(group.get_n_pages(), 1)
+        finally:
+            window.destroy()
+            while context.pending():
+                context.iteration(False)
+
     def test_named_themes_render_ansi_colors_and_persist(self):
         from app import AppearanceDialog, Window
         from gi.repository import Gdk, GLib, Gtk
@@ -263,14 +360,19 @@ class TerminalTests(unittest.TestCase):
                 failed = window.groups[""].get_nth_page(0)
                 pump_until(lambda: any(session is failed for session, _ in callbacks))
                 self.assertFalse(failed.active)
-                self.assertIn("启动失败", failed.status.get_text())
-                self.assertTrue(failed.reconnect.get_sensitive())
+                self.assertIn("启动失败", window.connection_label.get_tooltip_text())
+                self.assertTrue(window.reconnect.get_visible())
+                self.assertEqual(window.reconnect.get_label(), "重新打开")
                 window.close_session(failed)
                 self.assertEqual(window.groups[""].get_n_pages(), 0)
+                self.assertEqual(window.connection_label.get_text(), "本地终端 · 无会话")
+                self.assertFalse(window.reconnect.get_visible())
 
                 window.command_factory = lambda alias: ["/bin/sh", "-c", "read line"]
                 pending = window.new_session()
                 self.assertTrue(pending.pending)
+                self.assertIn("正在连接", window.connection_label.get_text())
+                self.assertFalse(window.reconnect.get_visible())
                 window.close_session(pending)
                 self.assertTrue(pending.closed)
                 pump_until(lambda: any(session is pending for session, _ in callbacks))
@@ -331,10 +433,13 @@ class TerminalTests(unittest.TestCase):
                 self.assertEqual(first.tab_label.get_text(), "[1]")
                 self.assertEqual(window.header.get_title(), "dev-server")
                 self.assertEqual(window.get_title(), "dev-server")
+                self.assertEqual(window.connection_label.get_text(), "dev-server · 在线")
+                self.assertFalse(window.reconnect.get_visible())
+                self.assertEqual(len(first.get_children()), 1, "Sessions must not have a second footer")
                 first.terminal.feed_child(b"hello-terminal\n")
                 pump_until(lambda: "REPLY=hello-terminal" in output(first))
                 group = window.groups["dev-server"]
-                group.get_action_widget(Gtk.PackType.END).clicked()
+                group.add_button.clicked()
                 second = group.get_nth_page(1)
                 pump_until(lambda: second.alive)
                 self.assertEqual(second.tab_label.get_text(), "[2]")
@@ -351,8 +456,9 @@ class TerminalTests(unittest.TestCase):
                 self.assertEqual(window.header.get_title(), "build-server")
                 remote = window.groups["build-server"].get_nth_page(0)
                 pump_until(lambda: remote.alive)
+                self.assertEqual(window.connection_label.get_text(), "build-server · 在线")
                 window.server_list.select_row(window.rows["dev-server"])
-                self.assertIs(window.stack.get_visible_child(), window.groups["dev-server"])
+                self.assertIs(window.stack.get_visible_child(), window.groups["dev-server"].panel)
                 # A late response from another server must never replace the visible account.
                 window.quota_received("dev-server", {
                     "codex": {"windows": [{"label": "5h", "used": 24, "reset": time.time() + 3600}]}})
@@ -364,11 +470,21 @@ class TerminalTests(unittest.TestCase):
                 self.assertEqual(window.groups["dev-server"].get_n_pages(), 2)
                 first.terminal.feed_child(b"exit\n")
                 pump_until(lambda: not first.active)
-                self.assertIn("退出码 7", first.status.get_text())
+                self.assertIn("退出码 7", first.status_detail)
+                self.assertEqual(window.connection_label.get_text(), "dev-server · 在线",
+                                 "A background tab exiting must not change the active tab status")
+                self.assertFalse(window.reconnect.get_visible())
+                group.set_current_page(0)
+                self.assertTrue(window.reconnect.get_visible())
+                self.assertEqual(window.reconnect.get_label(), "重新连接")
+                self.assertEqual(window.connection_label.get_text(), "dev-server · ")
+                self.assertIn("退出码 7", window.connection_label.get_tooltip_text())
                 self.assertEqual(first.tab_label.get_text(), "[1] · 已结束")
                 self.assertIn("REPLY=hello-terminal", output(first))
-                first.start()
+                window.reconnect.clicked()
+                self.assertFalse(window.reconnect.get_visible())
                 pump_until(lambda: first.alive)
+                self.assertEqual(window.connection_label.get_text(), "dev-server · 在线")
                 self.assertEqual(first.tab_label.get_text(), "[1]")
                 self.assertEqual(window.header.get_title(), "dev-server")
                 self.assertEqual(window.get_title(), "dev-server")
@@ -381,7 +497,7 @@ class TerminalTests(unittest.TestCase):
                 pump_until(lambda: not Path(f"/proc/{second_pid}").exists())
                 self.assertEqual(window.groups["dev-server"].get_n_pages(), 1)
                 for _ in range(3):
-                    group.get_action_widget(Gtk.PackType.END).clicked()
+                    group.add_button.clicked()
                 pump_until(lambda: all(page.alive for page in window.groups["dev-server"].get_children()))
                 window.groups["dev-server"].set_current_page(0)
                 # Screenshot contains simulated sessions only, never user data.
@@ -394,6 +510,11 @@ class TerminalTests(unittest.TestCase):
                                                    window.get_allocated_width(), window.get_allocated_height())
                 self.assertFalse(first.tab_label.get_layout().is_ellipsized(),
                                  "A normal server name and session number must be visible")
+                self.assertIs(window.quota_label.get_parent(), window.status_bar)
+                self.assertIs(window.connection_label.get_parent().get_parent(), window.status_bar)
+                quota_x = window.quota_label.translate_coordinates(window.status_bar, 0, 0)[0]
+                self.assertAlmostEqual(quota_x + window.quota_label.get_allocated_width() / 2,
+                                       window.status_bar.get_allocated_width() / 2, delta=2)
                 pixbuf.savev(str(Path(__file__).parent / "preview.png"), "png", [], [])
                 remote_pid = remote.pid
                 window.server_list.select_row(window.rows["build-server"])
@@ -403,6 +524,8 @@ class TerminalTests(unittest.TestCase):
                 self.assertNotIn("build-server", window.groups)
                 self.assertEqual(window.header.get_title(), "zTerm")
                 self.assertIn("选择服务器", window.quota_label.get_text())
+                self.assertEqual(window.connection_label.get_text(), "未选择服务器")
+                self.assertFalse(window.reconnect.get_visible())
                 window.server_list.select_row(window.rows[""])
                 self.assertEqual(window.header.get_title(), "本地终端")
                 local = window.groups[""].get_nth_page(0)

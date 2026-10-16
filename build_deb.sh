@@ -3,7 +3,7 @@
 set -eu
 umask 022
 source_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-version=${1:-0.2.1}
+version=${1:-0.2.2}
 dpkg --validate-version "$version"
 case "$version" in
     *[!0-9A-Za-z.+:~\-]*) echo 'Invalid package version' >&2; exit 1 ;;
