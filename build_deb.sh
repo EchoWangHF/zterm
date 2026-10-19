@@ -3,7 +3,7 @@
 set -eu
 umask 022
 source_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-version=${1:-0.2.2}
+version=${1:-0.2.3}
 dpkg --validate-version "$version"
 case "$version" in
     *[!0-9A-Za-z.+:~\-]*) echo 'Invalid package version' >&2; exit 1 ;;
@@ -54,7 +54,7 @@ Depends: python3 (>= 3.9), python3-gi, gir1.2-gtk-3.0, gir1.2-vte-2.91, librsvg2
 Homepage: https://github.com/zhou411X/zterm
 Description: zTerm terminal with grouped SSH sessions
  Independent local and SSH terminal with a collapsible server sidebar,
- per-server session tabs, configurable fonts and eight named color themes.
+ per-server session tabs, configurable fonts and fourteen named color themes.
 CONTROL
 # dpkg records root ownership; the staging directory remains user-owned.
 install -d "$source_dir/dist"

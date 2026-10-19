@@ -4,6 +4,25 @@
 所有 palette 数组按 ANSI 0–15 排列；只设置这 16 色，保留 VTE 的其余
 256 色与 truecolor 行为。字体、字号、自定义文字/背景/光标色仍单独保存。
 
+GNOME Terminal / Ubuntu 预设
+参考 Ubuntu 24.04：gnome-terminal 3.52.0-1ubuntu2、yaru-theme-gtk 24.04.2-0ubuntu1。
+五套文字/背景预设来自 GNOME Terminal 3.52.0 src/profile-editor.cc 的 color_schemes：
+https://github.com/GNOME/gnome-terminal/blob/3.52.0/src/profile-editor.cc
+  浅黄背景黑字：#000000 / #ffffdd
+  白底黑字：#000000 / #ffffff
+  黑底灰字：#aaaaaa / #000000
+  黑底白字：#ffffff / #000000
+  黑底绿字：#00ff00 / #000000
+Ubuntu 默认（李子色）：文字 #ffffff、背景 #300a24。
+值来自本机 Yaru gtk.gresource 内 /com/ubuntu/themes/Yaru/3.0/gtk.css 的
+terminal-window .terminal-screen 规则；采用窗口激活时颜色，不复制失焦变色行为。
+项目：https://github.com/ubuntu/yaru
+六套预设光标均使用文字颜色；ANSI 0–15 共用 Ubuntu 24.04 已安装的 GNOME 默认调色板，
+取自 /usr/share/glib-2.0/schemas/org.gnome.Terminal.gschema.xml 的 palette 默认值。
+上游：https://github.com/GNOME/gnome-terminal/blob/3.52.0/src/org.gnome.Terminal.gschema.xml
+注意 schema 默认亮绿色为 #33da7a；它与偏好页手动选择 GNOME 调色板时的 #33d17a 不同。
+这些都是随应用打包的 RGB 值，不读取或修改 GNOME Terminal 的用户配置。
+
 Solarized Light / Dark
 本机：~/.vim_runtime/sources_non_forked/vim-colors-solarized/colors/solarized.vim
 RGB 定义在 245–261 行，16 色索引在 285–300 行，明暗反转在 379–391 行。
@@ -36,4 +55,15 @@ ANSI 映射依据本机 16 色 cterm 段的组名：
 这属于将 Vim 主题适配到终端 ANSI 的约定，并非原作者提供的终端预设。
 项目：https://www.vim.org/scripts/script.php?script_id=760
 
-原有 classic/dark/light/ocean 标识及配色保留，兼容已保存的外观配置。
+已删除经典紫、深色、浅色、深海蓝预设；只保留旧标识和颜色用于识别配置迁移。
+classic/ocean → ubuntu-default，dark → gnome-gray-on-black，light → gnome-black-on-white。
+未修改的旧默认颜色换成目标预设颜色；用户自定义文字/背景/光标色及字体保留。
+读取时只在内存迁移，用户保存外观后才写入新标识。新配置默认使用 Ubuntu 默认（李子色）。
+
+应用界面配色
+“跟随终端配色”按所选终端预设生成界面色，也可独立选定上述任一主题，或使用系统 GTK 外观。
+界面背景/文字采用预设值，层次背景、悬停背景和边框分别以 6%、12%、25% 的文字色混合。
+强调色默认采用预设的 ANSI 蓝色；Ubuntu 使用橙色 #e95420，黑底绿字使用 #00af00 强调色
+和 #d0d0d0 界面文字。选中背景用 25% 强调色混合，以保留原文字的可读性。
+这些界面配色是 zterm 自行搭配的 GTK 样式，并非上述项目提供的完整桌面主题。
+样式只作用于 zTerm 当前窗口及其菜单/对话框，不修改系统 GTK/GNOME Terminal 配置。

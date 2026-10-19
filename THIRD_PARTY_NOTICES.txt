@@ -9,6 +9,23 @@ The application includes RGB palette snapshots and terminal mappings, not the
 upstream Vim scripts. The original authors and upstream licenses are retained
 below. Mapping details and source locations are in THEME_SOURCES.txt.
 
+GNOME Terminal color presets and default palette
+Copyright (c) 2002 Havoc Pennington
+Copyright (c) 2002 Mathias Hasselmann
+Copyright (c) 2008, 2011, 2017 Christian Persch
+License: GPL-3.0-or-later; distributed here under GPL-3.0 (LICENSE).
+https://github.com/GNOME/gnome-terminal/blob/3.52.0/src/profile-editor.cc
+https://github.com/GNOME/gnome-terminal/blob/3.52.0/src/org.gnome.Terminal.gschema.xml
+
+Ubuntu default terminal foreground/background (Yaru)
+Copyright (c) 2017-2018 Canonical Ltd.
+Copyright (c) 2009-2015 Red Hat, Inc.
+Copyright (c) 2009 Intel Corporation
+Copyright (c) 2015 Ruslan Izhbulatov
+License: GPL-3.0-or-later; distributed here under GPL-3.0 (LICENSE).
+Only the active-window RGB values are included, not the GTK theme stylesheets.
+https://github.com/ubuntu/yaru
+
 Solarized
 Copyright (c) 2011 Ethan Schoonover
 License: MIT (text below)

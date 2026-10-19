@@ -1,16 +1,58 @@
 """Model tests and real VTE lifecycle checks, run under xvfb-run."""
 
 import os
+import json
 from pathlib import Path
 import tempfile
 import time
 import unittest
 
-from model import (AliasStore, AppearanceStore, THEMES, default_appearance,
+from model import (AliasStore, AppearanceStore, THEMES, default_appearance, interface_colors,
                    discover_aliases, ssh_command, valid_alias)
 
 
 class ModelTests(unittest.TestCase):
+    def test_gnome_presets_match_source_colors(self):
+        expected = {
+            "gnome-black-on-light-yellow": ("#000000", "#ffffdd"),
+            "gnome-black-on-white": ("#000000", "#ffffff"),
+            "gnome-gray-on-black": ("#aaaaaa", "#000000"),
+            "gnome-white-on-black": ("#ffffff", "#000000"),
+            "gnome-green-on-black": ("#00ff00", "#000000"),
+            "ubuntu-default": ("#ffffff", "#300a24"),
+        }
+        self.assertEqual(len(THEMES), 14)
+        self.assertTrue({"classic", "dark", "light", "ocean"}.isdisjoint(THEMES))
+        for name, (fg, bg) in expected.items():
+            self.assertEqual((THEMES[name]["foreground"], THEMES[name]["background"]), (fg, bg))
+            self.assertEqual(THEMES[name]["cursor"], fg)
+        self.assertEqual(default_appearance()["theme"], "ubuntu-default")
+
+    def test_removed_themes_migrate_without_overwriting_custom_colors(self):
+        old_presets = {
+            "classic": ("ubuntu-default", "#eeeeec", "#241f31", "#eeeeec"),
+            "dark": ("gnome-gray-on-black", "#e5e7eb", "#15181e", "#93c5fd"),
+            "light": ("gnome-black-on-white", "#24292f", "#fafafa", "#0969da"),
+            "ocean": ("ubuntu-default", "#d8e7f3", "#102332", "#7dd3fc"),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            store = AppearanceStore(Path(directory) / "appearance.json")
+            for old, (new, fg, bg, cursor) in old_presets.items():
+                settings = {"theme": old, "font": "Monospace Bold 15",
+                            "foreground": fg, "background": bg, "cursor": cursor}
+                before = json.dumps(settings)
+                store.path.write_text(before)
+                migrated = store.load()
+                self.assertEqual(migrated["theme"], new)
+                self.assertEqual(migrated["font"], settings["font"])
+                for key in ("foreground", "background", "cursor"):
+                    self.assertEqual(migrated[key], THEMES[new][key])
+                self.assertEqual(store.path.read_text(), before, "Reading must not rewrite configuration")
+                custom = dict(settings, foreground="#123456", background="#654321", cursor="#ABCDEF")
+                store.save(custom)
+                self.assertEqual(custom["theme"], old, "Saving must not mutate the caller's settings")
+                self.assertEqual(store.load(), dict(custom, theme=new, interface_theme="follow-terminal"))
+
     def test_appearance_roundtrip_is_independent_of_servers(self):
         with tempfile.TemporaryDirectory() as directory:
             aliases = AliasStore(Path(directory) / "servers.json")
@@ -29,6 +71,7 @@ class ModelTests(unittest.TestCase):
             store.save(default_appearance())
             before = store.path.read_bytes()
             for changes in ({"font": ""}, {"theme": "unknown"}, {"theme": []},
+                            {"interface_theme": "unknown"}, {"interface_theme": []},
                             {"foreground": "not-a-color"}, {"background": None}):
                 with self.assertRaises(ValueError):
                     store.save(dict(default_appearance(), **changes))
@@ -73,6 +116,103 @@ class ModelTests(unittest.TestCase):
 
 
 class TerminalTests(unittest.TestCase):
+    def test_interface_theme_preview_is_scoped_and_persists(self):
+        from app import AppearanceDialog, Window, rgba
+        from gi.repository import GLib, Gtk
+
+        context = GLib.MainContext.default()
+
+        def pump_until(predicate):
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                while context.pending():
+                    context.iteration(False)
+                if predicate():
+                    return
+                time.sleep(0.01)
+            self.fail("Interface colors did not settle")
+
+        def background(widget):
+            return widget.get_style_context().get_background_color(Gtk.StateFlags.NORMAL).to_string()
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = AliasStore(Path(directory) / "one/servers.json")
+            other_store = AliasStore(Path(directory) / "two/servers.json")
+            # A pre-existing configuration without the new field remains readable.
+            legacy = default_appearance()
+            legacy.pop("interface_theme")
+            appearance = AppearanceStore(store.path.with_name("appearance.json"))
+            appearance.path.parent.mkdir(parents=True)
+            appearance.path.write_text(json.dumps(legacy))
+            before = appearance.path.read_bytes()
+            window = Window(enable_quota=False, store=store,
+                            command_factory=lambda _: ["/bin/sh", "-c", "read line"])
+            other = Window(enable_quota=False, store=other_store)
+            dialog = None
+            window.confirm = lambda *_: True
+            try:
+                original = window.appearance.copy()
+                self.assertEqual(original["interface_theme"], "follow-terminal")
+                window.server_list.select_row(window.rows[""])
+                session = window.current_session()
+                pump_until(lambda: session.alive)
+                pid = session.pid
+                original_background = session.terminal.get_color_background_for_draw().to_string()
+                pump_until(lambda: background(other.header) == rgba(interface_colors(original)["surface"]).to_string())
+                other_background = background(other.header)
+                dialog = AppearanceDialog(window)
+                for name in THEMES:
+                    with self.subTest(interface_theme=name):
+                        dialog.interface_theme.set_active_id(name)
+                        colors = interface_colors(dialog.values())
+                        expected = rgba(colors["surface"]).to_string()
+                        pump_until(lambda: background(window.header) == expected)
+                        for widget in (window.sidebar, window.status_bar, window.settings_menu,
+                                       window.groups[""].tab_strip):
+                            self.assertEqual(background(widget), expected)
+                        self.assertEqual(background(other.header), other_background)
+                        self.assertEqual(session.terminal.get_color_background_for_draw().to_string(),
+                                         original_background)
+                        self.assertEqual(window.appearance, original)
+                        self.assertEqual(session.pid, pid)
+                dialog.interface_theme.set_active_id("system")
+                self.assertEqual(window.interface_style.provider.to_string(), "")
+                dialog.interface_theme.set_active_id("solarized-dark")
+                dialog.response(Gtk.ResponseType.CANCEL)
+                dialog = None
+                pump_until(lambda: background(window.header) == other_background)
+                self.assertEqual(appearance.path.read_bytes(), before)
+
+                dialog = AppearanceDialog(window)
+                dialog.interface_theme.set_active_id("gruvbox-light")
+                expected = dialog.values()
+                dialog.response(Gtk.ResponseType.OK)
+                dialog = None
+                self.assertEqual(appearance.load(), expected)
+                self.assertEqual(session.pid, pid)
+                window.close_window()
+                window.destroy()
+                window = Window(enable_quota=False, store=store)
+                self.assertEqual(window.appearance, expected)
+                pump_until(lambda: background(window.header) == rgba(interface_colors(expected)["surface"]).to_string())
+                dialog = AppearanceDialog(window)
+                dialog.interface_theme.set_active_id("follow-terminal")
+                dialog.theme.set_active_id("solarized-dark")
+                pump_until(lambda: background(window.header) == rgba("#08313c").to_string())
+                # Closing the dialog through the window manager also cancels preview.
+                dialog.destroy()
+                dialog = None
+                pump_until(lambda: background(window.header) == rgba(interface_colors(expected)["surface"]).to_string())
+            finally:
+                if dialog is not None:
+                    dialog.destroy()
+                window.confirm = lambda *_: True
+                window.close_window()
+                window.destroy()
+                other.destroy()
+                while context.pending():
+                    context.iteration(False)
+
     def test_inline_add_tracks_tabs_reordering_overflow_and_empty_group(self):
         from types import SimpleNamespace
         from unittest.mock import patch
@@ -175,8 +315,7 @@ class TerminalTests(unittest.TestCase):
         from gi.repository import Gdk, GLib, Gtk
 
         context = GLib.MainContext.default()
-        names = [family + "-" + mode for family in ("solarized", "gruvbox", "papercolor", "peaksea")
-                 for mode in ("light", "dark")]
+        names = list(THEMES)
         with tempfile.TemporaryDirectory() as directory:
             window = Window(enable_quota=False, store=AliasStore(Path(directory) / "servers.json"))
             dialog = None
@@ -192,8 +331,10 @@ class TerminalTests(unittest.TestCase):
                         # Clear after any sample text still queued by VTE.feed().
                         swatches = "\x1b[2J\x1b[H\x1b[?25l" + "".join(f"\x1b[{40 + i}m  " for i in range(8))
                         swatches += "\x1b[0m\r\n" + "".join(f"\x1b[{100 + i}m  " for i in range(8))
-                        terminal.feed((swatches + "\x1b[0m").encode())
+                        terminal.feed((swatches + "\x1b[0m\r\n  ██").encode())
                         expected = [tuple(bytes.fromhex(color[1:])) for color in THEMES[name]["palette"]]
+                        expected += [tuple(bytes.fromhex(THEMES[name][key][1:]))
+                                     for key in ("background", "foreground")]
                         deadline = time.monotonic() + 3
                         actual = []
                         while time.monotonic() < deadline:
@@ -206,7 +347,7 @@ class TerminalTests(unittest.TestCase):
                                                                   terminal.get_allocated_height())
                                 pixels = pixbuf.get_pixels()
                                 actual = []
-                                for i in range(16):
+                                for i in range(18):
                                     x = (2 * (i % 8) + 1) * terminal.get_char_width()
                                     y = (i // 8) * terminal.get_char_height() + terminal.get_char_height() // 2
                                     offset = y * pixbuf.get_rowstride() + x * pixbuf.get_n_channels()
@@ -214,7 +355,7 @@ class TerminalTests(unittest.TestCase):
                                 if actual == expected:
                                     break
                             time.sleep(0.02)
-                        self.assertEqual(actual, expected, "Rendered ANSI colors must use the selected palette")
+                        self.assertEqual(actual, expected, "Rendered ANSI and default colors must match the theme")
                         dialog.response(Gtk.ResponseType.OK)
                         saved = AppearanceStore(window.appearance_store.path).load()
                         self.assertEqual(saved["theme"], name)
@@ -262,7 +403,7 @@ class TerminalTests(unittest.TestCase):
                 original = window.appearance.copy()
                 dialog = AppearanceDialog(window)
                 dialogs.append(dialog)
-                dialog.theme.set_active_id("light")
+                dialog.theme.set_active_id("gnome-black-on-white")
                 dialog.font.set_font("Monospace Bold 16")
                 dialog.font.emit("font-set")
                 self.assertEqual(dialog.preview.get_font().get_size(), 16 * Pango.SCALE)
@@ -272,7 +413,7 @@ class TerminalTests(unittest.TestCase):
 
                 dialog = AppearanceDialog(window)
                 dialogs.append(dialog)
-                dialog.theme.set_active_id("light")
+                dialog.theme.set_active_id("gnome-black-on-white")
                 dialog.font.set_font("Monospace Bold 16")
                 dialog.colors["background"].set_rgba(rgba("#e0e8ef"))
                 dialog.colors["background"].emit("color-set")

@@ -15,8 +15,8 @@ gi.require_version("Gdk", "3.0")
 gi.require_version("Vte", "2.91")
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango, Vte
 
-from model import (AliasStore, AppearanceStore, THEMES,
-                   default_appearance, discover_aliases, ssh_command, valid_alias)
+from model import (AliasStore, AppearanceStore, THEMES, INTERFACE_THEMES,
+                   default_appearance, discover_aliases, interface_colors, ssh_command, valid_alias)
 from quota import fetch as fetch_quota, display as display_quota
 
 
@@ -43,10 +43,80 @@ def apply_appearance(terminal, settings):
     terminal.set_color_cursor_foreground(rgba(settings["background"]))
 
 
+class InterfaceStyle:
+    """Window-scoped GTK colors shared with that window's menus and dialogs."""
+
+    def __init__(self, window):
+        self.css_class = f"zterm-ui-{id(self)}"
+        self.provider = Gtk.CssProvider()
+        self.screen = window.get_screen()
+        Gtk.StyleContext.add_provider_for_screen(
+            self.screen, self.provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION + 1)
+        self.attach(window)
+        window.connect("destroy", self.dispose)
+
+    def attach(self, widget):
+        widget.get_style_context().add_class(self.css_class)
+
+    def dispose(self, *_):
+        Gtk.StyleContext.remove_provider_for_screen(self.screen, self.provider)
+
+    def apply(self, settings):
+        colors = interface_colors(settings)
+        if colors is None:
+            self.provider.load_from_data(b"")
+            return
+        css = """
+            @scope { background-color: @background; color: @foreground; }
+            @scope headerbar, @scope .workspace-sidebar, @scope .workspace-status,
+            @scope .workspace-tabs, @scope menu, menu@scope {
+                background: @surface; color: @foreground; border-color: @border;
+                box-shadow: none;
+            }
+            @scope label { color: inherit; text-shadow: none; }
+            @scope list, @scope viewport, @scope notebook, @scope stack {
+                background-color: @background; color: @foreground;
+            }
+            @scope button, @scope entry {
+                background: @surface; color: @foreground; border-color: @border;
+                box-shadow: none; text-shadow: none;
+            }
+            @scope button.flat { background: transparent; border-color: transparent; }
+            @scope button:hover, @scope row:hover, @scope menuitem:hover {
+                background: @hover; color: @foreground;
+            }
+            @scope button:checked, @scope button:active, @scope row:selected,
+            @scope entry selection {
+                background: @selection; color: @foreground;
+            }
+            @scope button:disabled { color: alpha(@foreground, 0.45); }
+            @scope entry:focus { border-color: @accent; }
+            @scope separator, @scope paned > separator { background: @border; }
+            @scope scrollbar { background: @surface; }
+            @scope scrollbar slider { background: @border; border-color: @border; }
+            @scope scrollbar slider:hover { background: @accent; }
+            @scope .session-tab { background: @surface; border-color: @border; }
+            @scope .session-tab.active {
+                background: @selection; border-bottom-color: @accent;
+                box-shadow: inset 0 -2px @accent;
+            }
+            @scope .session-tab-select, @scope .session-tab-close {
+                background: none; border: none; box-shadow: none;
+            }
+            @scope .session-tab-close:hover { background: @hover; }
+        """
+        for key, color in colors.items():
+            css = css.replace("@" + key, color)
+        self.provider.load_from_data(css.replace("@scope", "." + self.css_class).encode())
+
+
 class AppearanceDialog(Gtk.Dialog):
     def __init__(self, window):
-        super().__init__(title="终端外观", transient_for=window, modal=True)
+        super().__init__(title="外观设置", transient_for=window, modal=True)
         self.owner = window
+        window.interface_style.attach(self)
+        self.connect("destroy", lambda *_: window.interface_style.apply(window.appearance))
+        self.loading = True
         self.set_default_size(600, 540)
         self.add_buttons("恢复默认", Gtk.ResponseType.REJECT,
                          "取消", Gtk.ResponseType.CANCEL, "保存并应用", Gtk.ResponseType.OK)
@@ -63,18 +133,24 @@ class AppearanceDialog(Gtk.Dialog):
         self.theme = Gtk.ComboBoxText()
         for key, theme in THEMES.items():
             self.theme.append(key, theme["name"])
-        grid.attach(Gtk.Label(label="配色主题", xalign=0), 0, 1, 1, 1)
+        grid.attach(Gtk.Label(label="终端配色", xalign=0), 0, 1, 1, 1)
         grid.attach(self.theme, 1, 1, 1, 1)
+        self.interface_theme = Gtk.ComboBoxText()
+        for key, name in INTERFACE_THEMES.items():
+            self.interface_theme.append(key, name)
+        grid.attach(Gtk.Label(label="界面主题", xalign=0), 0, 2, 1, 1)
+        grid.attach(self.interface_theme, 1, 2, 1, 1)
         self.colors = {}
         for row, (key, label) in enumerate((("foreground", "文字颜色"),
-                                           ("background", "背景颜色"), ("cursor", "光标颜色")), 2):
+                                           ("background", "背景颜色"), ("cursor", "光标颜色")), 3):
             control = Gtk.ColorButton(title=label, use_alpha=False)
             self.colors[key] = control
             grid.attach(Gtk.Label(label=label, xalign=0), 0, row, 1, 1)
             grid.attach(control, 1, row, 1, 1)
             control.connect("color-set", self.update_preview)
         content.pack_start(grid, False, False, 0)
-        content.pack_start(Gtk.Label(label="可自定义主题颜色；保存后应用到所有会话，新会话也会沿用。",
+        content.pack_start(Gtk.Label(label="界面主题控制标题栏、侧栏、标签和底栏，可跟随终端或独立选择。\n"
+                                          "切换时预览界面；取消恢复原样，保存后应用到所有会话。",
                                     xalign=0, wrap=True), False, False, 0)
         self.preview = Vte.Terminal()
         self.preview.set_size(52, 5)
@@ -89,20 +165,25 @@ class AppearanceDialog(Gtk.Dialog):
         self.error = Gtk.Label(xalign=0, wrap=True)
         content.pack_start(self.error, False, False, 0)
         self.theme.connect("changed", self.theme_changed)
+        self.interface_theme.connect("changed", self.update_preview)
         self.font.connect("font-set", self.update_preview)
         self.set_values(window.appearance)
         self.connect("response", self.respond)
         self.show_all()
 
     def set_values(self, settings):
+        self.loading = True
         self.font.set_font(settings["font"])
+        self.interface_theme.set_active_id(settings.get("interface_theme", "follow-terminal"))
         self.theme.set_active_id(settings["theme"])
         for key, control in self.colors.items():
             control.set_rgba(rgba(settings[key]))
+        self.loading = False
         self.update_preview()
 
     def values(self):
-        settings = {"font": self.font.get_font(), "theme": self.theme.get_active_id()}
+        settings = {"font": self.font.get_font(), "theme": self.theme.get_active_id(),
+                    "interface_theme": self.interface_theme.get_active_id()}
         for key, control in self.colors.items():
             color = control.get_rgba()
             settings[key] = "#{:02x}{:02x}{:02x}".format(
@@ -116,7 +197,10 @@ class AppearanceDialog(Gtk.Dialog):
         self.update_preview()
 
     def update_preview(self, *_):
+        if self.loading:
+            return
         apply_appearance(self.preview, self.values())
+        self.owner.interface_style.apply(self.values())
 
     def respond(self, _, response):
         if response == Gtk.ResponseType.REJECT:
@@ -226,6 +310,7 @@ class Session(Gtk.Box):
         if event.button != 3:
             return False
         menu = Gtk.Menu()
+        self.window.interface_style.attach(menu)
         for name, action in [("复制", lambda _: terminal.copy_clipboard_format(Vte.Format.TEXT)),
                              ("粘贴", lambda _: terminal.paste_clipboard()),
                              ("全选", lambda _: terminal.select_all())]:
@@ -277,6 +362,7 @@ class SessionNotebook(Gtk.Notebook):
         """)
         self.panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.tab_strip = Gtk.Box(spacing=3)
+        self.tab_strip.get_style_context().add_class("workspace-tabs")
         self.tab_scroll = Gtk.ScrolledWindow()
         self.tab_scroll.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.NEVER)
         self.tab_scroll.add(self.tab_strip)
@@ -399,6 +485,8 @@ class Window(Gtk.ApplicationWindow):
         except (OSError, ValueError) as error:
             self.appearance = default_appearance()
             self.appearance_error = str(error)
+        self.interface_style = InterfaceStyle(self)
+        self.interface_style.apply(self.appearance)
         self.command_factory = command_factory or self.default_command
         self.groups, self.rows, self.counters = {}, {}, {}
         self.current = None
@@ -422,6 +510,7 @@ class Window(Gtk.ApplicationWindow):
         header.pack_start(self.sidebar_toggle)
         self.settings_button = Gtk.MenuButton(label="设置")
         self.settings_menu = Gtk.Menu()
+        self.interface_style.attach(self.settings_menu)
         for label, callback in [("添加服务器", lambda _: self.add_dialog()),
                                 ("导入别名", lambda _: self.import_aliases()),
                                 ("快捷键", lambda _: self.show_shortcuts()),
@@ -442,6 +531,7 @@ class Window(Gtk.ApplicationWindow):
         self.add(layout)
         layout.pack_start(pane, True, True, 0)
         self.status_bar = Gtk.Box(spacing=8, margin=6)
+        self.status_bar.get_style_context().add_class("workspace-status")
         connection = Gtk.Box(spacing=4)
         self.connection_label = Gtk.Label(label="未选择服务器", xalign=0)
         self.connection_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
@@ -463,6 +553,7 @@ class Window(Gtk.ApplicationWindow):
         layout.pack_end(self.status_bar, False, False, 0)
         side = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=10)
         self.sidebar = side
+        side.get_style_context().add_class("workspace-sidebar")
         side.set_size_request(170, -1)
         side.pack_start(Gtk.Label(label="服务器", xalign=0), False, False, 4)
         self.search = Gtk.SearchEntry(placeholder_text="搜索 SSH 别名")
@@ -621,6 +712,7 @@ class Window(Gtk.ApplicationWindow):
 
     def set_appearance(self, settings):
         self.appearance = settings.copy()
+        self.interface_style.apply(settings)
         for group in self.groups.values():
             for session in group.get_children():
                 apply_appearance(session.terminal, settings)
@@ -634,6 +726,7 @@ class Window(Gtk.ApplicationWindow):
         dialog = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.INFO,
                                    buttons=Gtk.ButtonsType.OK, text=title)
         dialog.format_secondary_text(message)
+        self.interface_style.attach(dialog)
         dialog.run()
         dialog.destroy()
         return False
@@ -642,6 +735,7 @@ class Window(Gtk.ApplicationWindow):
         dialog = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
                                    buttons=Gtk.ButtonsType.NONE, text=title)
         dialog.format_secondary_text(message)
+        self.interface_style.attach(dialog)
         dialog.add_buttons("取消", Gtk.ResponseType.CANCEL, "关闭", Gtk.ResponseType.OK)
         dialog.set_default_response(Gtk.ResponseType.CANCEL)
         answer = dialog.run() == Gtk.ResponseType.OK
@@ -673,6 +767,7 @@ class Window(Gtk.ApplicationWindow):
 
     def add_dialog(self):
         dialog = Gtk.Dialog(title="添加 SSH 别名", transient_for=self, modal=True)
+        self.interface_style.attach(dialog)
         dialog.add_buttons("取消", Gtk.ResponseType.CANCEL, "保存", Gtk.ResponseType.OK)
         dialog.set_default_response(Gtk.ResponseType.OK)
         content = dialog.get_content_area()

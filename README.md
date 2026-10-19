@@ -9,7 +9,9 @@ zterm 项目的应用显示名为 **zTerm**，是基于 Python、GTK 3 和 VTE �
 - 加宽会话标签将序号与右侧关闭按钮放在同一个标签内；新建“+”紧随最后一个标签，支持拖动排序和横向滚动。
 - 窗口标题随当前服务器切换；统一底栏左侧显示服务器与当前会话状态，离线后可直接重连，中间显示 Codex 订阅额度。
 - 设置字体、字号、文字、背景及光标颜色，预览后保存并应用到所有会话。
+- 应用界面主题覆盖标题栏、侧栏、标签、底栏和菜单；可跟随终端配色、独立搭配 14 套明暗配色，或跟随系统外观，支持预览、取消恢复及保存。
 - Solarized、Gruvbox、PaperColor、Peaksea 的 Light / Dark 配色及 ANSI 16 色调色板。
+- 六套 GNOME Terminal / Ubuntu 配色：浅黄背景黑字、白底黑字、黑底灰字、黑底白字、黑底绿字、Ubuntu 默认（李子色），共 14 套主题。
 - 独立应用图标和桌面启动入口；配置在重启后保留，不自动重连服务器。
 
 ## 安装已发布的 deb 包（推荐）
@@ -18,17 +20,17 @@ zterm 项目的应用显示名为 **zTerm**，是基于 Python、GTK 3 和 VTE �
 需要图形桌面环境；其他 Debian / Ubuntu 版本尚未逐一验证。
 
 从 [Releases](https://github.com/zhou411X/zterm/releases) 下载
-`zterm_0.2.2_all.deb`，进入下载目录后安装：
+`zterm_0.2.3_all.deb`，进入下载目录后安装：
 
 ```sh
-sudo apt install ./zterm_0.2.2_all.deb
+sudo apt install ./zterm_0.2.3_all.deb
 /usr/bin/zterm
 ```
 
 也支持 `dpkg -i`；如果提示缺少依赖，随后用 apt 补齐：
 
 ```sh
-sudo dpkg -i ./zterm_0.2.2_all.deb
+sudo dpkg -i ./zterm_0.2.3_all.deb
 # 仅当上一步报告缺少依赖时执行：
 sudo apt --fix-broken install
 ```
@@ -74,10 +76,10 @@ sudo apt install dpkg
 # Python 语法编译检查；不会生成本机架构专用的可执行程序。
 /usr/bin/python3 -m py_compile app.py model.py quota.py
 sh build_deb.sh
-sudo apt install ./dist/zterm_0.2.2_all.deb
+sudo apt install ./dist/zterm_0.2.3_all.deb
 ```
 
-可通过 `sh build_deb.sh 0.2.3` 指定版本。安装包为 `Architecture: all`，
+可通过 `sh build_deb.sh 0.2.4` 指定版本。安装包为 `Architecture: all`，
 包含 Python 源码、桌面入口和图标，运行依赖由 apt 安装。
 系统版启动命令为 `/usr/bin/zterm`，程序放在 `/usr/share/ssh-workbench/`，
 文档放在 `/usr/share/doc/zterm/`，继续使用原有用户配置。
@@ -110,12 +112,12 @@ GDK_BACKEND=x11 xvfb-run -a /usr/bin/python3 test_workbench.py
 ```
 
 测试涵盖配置保存、SSH 参数、PTY 输入输出、会话切换和回收、外观保存恢复，
-以及八个命名主题的实际 ANSI 色块渲染、标签布局/排序/溢出滚动和统一底栏状态/重连。
+以及 14 套主题的实际 ANSI/前景/背景色块渲染、旧主题配置迁移、界面主题预览/保存/窗口隔离、标签布局/排序/溢出滚动和统一底栏状态/重连。
 “在线”依据当前会话进程状态；真实 SSH 断网场景尚未验证。
 截图是测试生成物，不纳入版本控制。
 
 详细用法和快捷键见 [HELP.txt](HELP.txt)，主题来源与适配约定见
-[THEME_SOURCES.txt](THEME_SOURCES.txt)。主题只改变终端默认色及 ANSI 0–15，
+[THEME_SOURCES.txt](THEME_SOURCES.txt)。终端配色只改变终端默认色及 ANSI 0–15，
 不覆盖程序自行指定的 truecolor 颜色。
 
 ## 开源许可
