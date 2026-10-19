@@ -18,7 +18,7 @@ from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango, Vte
 
 from model import (AliasStore, AppearanceStore, THEMES, INTERFACE_THEMES,
                    bash_ssh_aliases, default_appearance, interface_colors, ssh_command,
-                   server_ssh_command, validate_server)
+                   server_ssh_command, validate_server, legacy_server_profile)
 import credentials
 from quota import fetch as fetch_quota, display as display_quota
 
@@ -226,9 +226,21 @@ class AppearanceDialog(Gtk.Dialog):
 
 
 class ServerDialog(Gtk.Dialog):
-    def __init__(self, owner):
-        super().__init__(title="添加服务器", transient_for=owner, modal=True, destroy_with_parent=True)
+    def __init__(self, owner, server_id=None):
+        title = "编辑服务器" if server_id else "添加服务器"
+        super().__init__(title=title, modal=False)
+        self.server_id = server_id
+        self.original_profile = dict(owner.profiles.get(server_id, {}))
+        self.loading = False
         self.owner, self.busy, self.closed = owner, False, False
+        self.set_application(owner.get_application())
+        self.set_type_hint(Gdk.WindowTypeHint.NORMAL)
+        self.set_skip_taskbar_hint(False)
+        self.set_icon(owner.get_icon())
+        header = Gtk.HeaderBar(title=title, show_close_button=True)
+        header.set_decoration_layout(":minimize,maximize,close")
+        self.set_titlebar(header)
+        self.owner_destroy_handler = owner.connect("destroy", lambda *_: self.destroy())
         owner.interface_style.attach(self)
         self.add_buttons("取消", Gtk.ResponseType.CANCEL, "保存", Gtk.ResponseType.OK)
         self.set_default_response(Gtk.ResponseType.OK)
@@ -256,17 +268,72 @@ class ServerDialog(Gtk.Dialog):
             self.grid.attach(Gtk.Label(label=label, xalign=0), 0, index, 1, 1)
             widget.set_hexpand(True)
             self.grid.attach(widget, 1, index, 1, 1)
-        content.add(Gtk.Label(label="别名显示在左侧服务器栏和窗口标题。\n"
-                                   "密码保存在系统钥匙环；留空可使用已有免密登录。", xalign=0))
+        self.clear_password = Gtk.CheckButton(label="清除已保存密码（使用密钥登录）")
+        self.clear_password.connect("toggled", lambda toggle:
+                                    self.password.set_sensitive(not toggle.get_active()))
+        self.grid.attach(self.clear_password, 1, 5, 1, 1)
+        hint = ("密码留空保留原密码；勾选上方选项可清除。\n"
+                "连接信息在新会话或重新连接时生效，现有连接继续运行。" if server_id else
+                "密码保存在系统钥匙环；留空可使用已有免密登录。")
+        content.add(Gtk.Label(label="别名显示在左侧服务器栏和窗口标题。\n" + hint, xalign=0))
         self.error_label = Gtk.Label(xalign=0, wrap=True, max_width_chars=52)
         content.add(self.error_label)
         self.connect("response", self.respond)
         self.connect("delete-event", lambda *_: self.busy)
         self.connect("destroy", self.on_destroy)
         self.show_all()
+        self.clear_password.set_visible(bool(self.original_profile.get("password_saved")))
+        if server_id:
+            self.password.set_placeholder_text("留空保留原密码")
+            if self.original_profile:
+                self.fill_profile(self.original_profile)
+            else:
+                self.name.set_text(server_id)
+                self.host.set_text(server_id)
+                self.loading = True
+                self.grid.set_sensitive(False)
+                self.set_response_sensitive(Gtk.ResponseType.OK, False)
+                self.error_label.set_text("正在读取原 SSH 配置…")
+
+                def resolve():
+                    profile = None
+                    try:
+                        profile = legacy_server_profile(server_id)
+                    except Exception:
+                        pass
+                    GLib.idle_add(self.legacy_loaded, profile)
+                threading.Thread(target=resolve, daemon=True).start()
+
+    def fill_profile(self, profile):
+        self.name.set_text(profile["name"])
+        self.host.set_text(profile["host"])
+        self.username.set_text(profile["username"])
+        self.port.set_value(profile["port"])
+
+    def legacy_loaded(self, profile):
+        if not self.closed:
+            self.loading = False
+            if profile:
+                self.fill_profile(profile)
+            self.error_label.set_text("" if profile else "无法读取原 SSH 配置，请手动填写连接信息。")
+            self.grid.set_sensitive(True)
+            self.set_response_sensitive(Gtk.ResponseType.OK, True)
+        return False
 
     def on_destroy(self, *_):
         self.closed = True
+        if self.server_id:
+            self.owner.server_editors.pop(self.server_id, None)
+        else:
+            self.owner.server_dialog = None
+        self.owner.disconnect(self.owner_destroy_handler)
+
+    def check_current(self, profile):
+        if self.server_id and self.server_id not in self.owner.aliases:
+            raise ValueError("服务器已被移除，请关闭此编辑窗口。")
+        if any(self.owner.display_name(alias) == profile["name"]
+               for alias in self.owner.aliases if alias != self.server_id):
+            raise ValueError("该显示别名已存在，请使用不同的名字。")
 
     def respond(self, _, response):
         if self.busy:
@@ -274,26 +341,35 @@ class ServerDialog(Gtk.Dialog):
         if response != Gtk.ResponseType.OK:
             self.destroy()
             return
+        if self.loading:
+            return
         host = self.host.get_text().strip()
-        password = self.password.get_text()
+        password = "" if self.clear_password.get_active() else self.password.get_text()
+        keep_password = (self.original_profile.get("password_saved", False)
+                         and not self.clear_password.get_active())
         try:
             profile = validate_server({"name": self.name.get_text().strip() or host, "host": host,
                                        "username": self.username.get_text().strip(),
                                        "port": self.port.get_value_as_int(),
-                                       "password_saved": bool(password)})
+                                       "password_saved": bool(password) or keep_password})
             if any(char in password for char in "\r\n\0"):
                 raise ValueError("密码不能包含换行或空字符。")
-            if profile["name"] in [self.owner.display_name(alias) for alias in self.owner.aliases]:
-                raise ValueError("该显示别名已存在，请使用不同的名字。")
+            self.check_current(profile)
             if self.owner.load_error:
                 raise ValueError("请先修复现有服务器配置并重新启动，避免覆盖原有数据。")
         except ValueError as error:
             self.error_label.set_text(str(error))
             return
-        server_id = "server-" + uuid.uuid4().hex
-        aliases = self.owner.aliases + [server_id]
-        profiles = dict(self.owner.profiles, **{server_id: profile})
+        server_id = self.server_id or "server-" + uuid.uuid4().hex
+        if self.server_id and password:
+            # Stage a new secret; never overwrite the old one before JSON commits.
+            profile["credential_id"] = "password-" + uuid.uuid4().hex
+        elif keep_password and "credential_id" in self.original_profile:
+            profile["credential_id"] = self.original_profile["credential_id"]
         self.busy = True
+        self.save_application = self.owner.get_application()
+        if self.save_application:
+            self.save_application.hold()
         self.grid.set_sensitive(False)
         self.set_response_sensitive(Gtk.ResponseType.OK, False)
         self.set_response_sensitive(Gtk.ResponseType.CANCEL, False)
@@ -301,37 +377,73 @@ class ServerDialog(Gtk.Dialog):
 
         def work():
             error = None
-            saved_secret = False
             try:
                 if password:
-                    credentials.save_password(server_id, profile["name"], password)
-                    saved_secret = True
-                self.owner.store.save(aliases, profiles)
+                    credentials.save_password(profile.get("credential_id", server_id), profile["name"], password)
             except Exception:
-                error = "保存失败，请检查配置目录权限及系统钥匙环是否可用、已解锁。"
-                if saved_secret:
-                    try:
-                        credentials.delete_password(server_id)
-                    except Exception:
-                        error += "\n钥匙环中的残留条目未能清除，可在“密码和密钥”中移除 zTerm · " + profile["name"] + "。"
-            GLib.idle_add(self.finished, server_id, aliases, profiles, error)
+                error = "保存失败，请检查系统钥匙环是否可用、已解锁。"
+            GLib.idle_add(self.finished, server_id, profile, error, bool(password) and error is None)
 
         threading.Thread(target=work, daemon=True).start()
 
-    def finished(self, server_id, aliases, profiles, error):
-        if self.closed:
-            return False
+    def finished(self, server_id, profile, error, secret_saved):
+        committed = False
+        old_profile = self.owner.profiles.get(server_id, {})
+        if not self.closed and error is None:
+            # Merge on the UI thread: other independent forms may have saved.
+            aliases = self.owner.aliases if self.server_id else self.owner.aliases + [server_id]
+            profiles = dict(self.owner.profiles, **{server_id: profile})
+            try:
+                self.check_current(profile)
+                self.owner.store.save(aliases, profiles)
+            except ValueError as failure:
+                error = str(failure)
+            except OSError:
+                error = "保存失败，请检查配置目录是否可写。"
+            else:
+                committed = True
+                self.owner.aliases, self.owner.profiles = aliases, profiles
+                if self.server_id:
+                    self.owner.server_updated(server_id)
+                else:
+                    self.owner.add_row(server_id)
+        cleanup = None
+        new_key = profile.get("credential_id", server_id)
+        old_key = old_profile.get("credential_id", server_id)
+        if secret_saved and not committed:
+            cleanup = new_key
+        elif committed and old_profile.get("password_saved") and (
+                not profile["password_saved"] or old_key != new_key):
+            cleanup = old_key
+        if committed:
+            self.password.set_text("")
+            self.destroy()
+        if cleanup:
+            def clear_secret():
+                message = error
+                try:
+                    credentials.delete_password(cleanup)
+                except Exception:
+                    message = (message + "\n" if message else "") + (
+                        "钥匙环中的旧/未使用密码未能清除，可在“密码和密钥”中移除 zTerm · " +
+                        old_profile.get("name", profile["name"]) + " 对应条目。")
+                GLib.idle_add(self.finish_save, message, committed)
+            threading.Thread(target=clear_secret, daemon=True).start()
+        else:
+            self.finish_save(error, committed)
+        return False
+
+    def finish_save(self, error, committed=False):
         self.busy = False
-        if error:
+        if not self.closed and error:
             self.error_label.set_text(error)
             self.grid.set_sensitive(True)
             self.set_response_sensitive(Gtk.ResponseType.OK, True)
             self.set_response_sensitive(Gtk.ResponseType.CANCEL, True)
-        else:
-            self.owner.aliases, self.owner.profiles = aliases, profiles
-            self.owner.add_row(server_id)
-            self.password.set_text("")
-            self.destroy()
+        if self.save_application:
+            self.save_application.release()
+        if committed and error and not self.owner.quota_closed:
+            self.owner.info("服务器已保存，密码清理未完成", error)
         return False
 
 
@@ -613,6 +725,8 @@ class Window(Gtk.ApplicationWindow):
         self.set_wmclass("ssh-workbench", "SSH Workbench")
         self.set_icon_from_file(str(Path(__file__).with_name("workbench.svg")))
         self.store = store or AliasStore()
+        self.server_dialog = None
+        self.server_editors = {}
         self.appearance_store = AppearanceStore(self.store.path.with_name("appearance.json"))
         self.appearance_error = None
         try:
@@ -695,6 +809,21 @@ class Window(Gtk.ApplicationWindow):
         self.search.connect("search-changed", lambda _: self.server_list.invalidate_filter())
         side.pack_start(self.search, False, False, 0)
         self.server_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
+        self.server_drag_target = Gtk.TargetEntry.new(
+            f"application/x-zterm-server-{id(self)}", Gtk.TargetFlags.SAME_APP, 0)
+        self.server_drag_alias = ""
+        # ListBox receives pointer presses on its windowless rows.
+        self.server_list.drag_source_set(
+            Gdk.ModifierType.BUTTON1_MASK, [self.server_drag_target], Gdk.DragAction.MOVE)
+        self.server_list.connect("button-press-event", self.server_drag_pressed)
+        self.server_list.connect("drag-begin", self.server_drag_begin)
+        self.server_list.connect("drag-data-get", lambda widget, context, data, info, timestamp:
+                                 data.set(data.get_target(), 8, self.server_drag_alias.encode("ascii")))
+        self.server_drag_css = Gtk.CssProvider()
+        self.server_drag_css.load_from_data(b"""
+            .server-drop-before { box-shadow: inset 0 2px @theme_selected_bg_color; }
+            .server-drop-after { box-shadow: inset 0 -2px @theme_selected_bg_color; }
+        """)
         self.server_list.set_filter_func(lambda row: not row.alias or
                                         self.search.get_text().lower() in
                                         (self.display_name(row.alias) + " " +
@@ -821,15 +950,18 @@ class Window(Gtk.ApplicationWindow):
         def work():
             result = fetch_quota(alias, profile)
             if not self.quota_closed:
-                GLib.idle_add(self.quota_received, alias, result)
+                GLib.idle_add(self.quota_received, alias, result, profile)
 
         threading.Thread(target=work, daemon=True).start()
 
-    def quota_received(self, alias, result):
+    def quota_received(self, alias, result, profile=None):
         if self.quota_closed:
             return False
         self.quota_busy = False
         self.quota_refresh.set_sensitive(True)
+        if profile != self.profiles.get(alias) or (alias and alias not in self.aliases):
+            self.refresh_quota()
+            return False
         result["fetched"] = time.time()
         self.quota_cache[alias] = result
         self.render_quota()
@@ -904,15 +1036,124 @@ class Window(Gtk.ApplicationWindow):
         label = Gtk.Label(label=self.display_name(alias), xalign=0, margin=12)
         label.set_ellipsize(Pango.EllipsizeMode.END)
         row.add(label)
-        profile = self.profiles.get(alias)
-        row.set_tooltip_text((f'{profile["username"]}@{profile["host"]} · 端口 {profile["port"]}')
-                             if profile else "ssh " + alias if alias else "本地登录 shell")
+        self.update_row(row)
+        if alias:
+            row.get_style_context().add_provider(
+                self.server_drag_css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            row.drag_dest_set(Gtk.DestDefaults.ALL, [self.server_drag_target], Gdk.DragAction.MOVE)
+            row.connect("drag-motion", self.server_drag_motion)
+            row.connect("drag-leave", self.clear_server_drop)
+            row.connect("drag-data-received", self.server_dropped)
         self.rows[alias] = row
         self.server_list.add(row)
         row.show_all()
 
+    def update_row(self, row):
+        alias = row.alias
+        row.get_child().set_text(self.display_name(alias))
+        profile = self.profiles.get(alias)
+        row.set_tooltip_text((f'{profile["username"]}@{profile["host"]} · 端口 {profile["port"]}')
+                             if profile else "ssh " + alias if alias else "本地登录 shell")
+        if alias:
+            row.set_tooltip_text(row.get_tooltip_text() + "\n拖动可调整服务器顺序；右键编辑服务器")
+
+    def server_updated(self, alias):
+        self.update_row(self.rows[alias])
+        self.server_list.invalidate_filter()
+        # A running process keeps its connection; the next restart uses new argv.
+        if alias in self.groups:
+            for session in self.groups[alias].get_children():
+                session.argv = self.command_factory(alias)
+        self.update_server_title()
+        self.render_status()
+        self.quota_cache.pop(alias, None)
+        self.render_quota()
+        self.refresh_quota()
+
+    def server_context_menu(self, alias):
+        menu = Gtk.Menu()
+        item = Gtk.MenuItem(label="编辑服务器")
+        item.connect("activate", lambda *_: self.edit_dialog(alias))
+        menu.append(item)
+        menu.attach_to_widget(self.server_list, None)
+        self.interface_style.attach(menu)
+        menu.connect("selection-done", lambda *_: menu.destroy())
+        menu.show_all()
+        return menu
+
+    def server_drag_pressed(self, widget, event):
+        row = self.server_list.get_row_at_y(int(event.y))
+        if event.button == 3 and row and row.alias:
+            self.server_context_menu(row.alias).popup_at_pointer(event)
+            return True
+        if event.button == 1:
+            self.server_drag_alias = row.alias if row else ""
+        return False
+
+    def server_drag_begin(self, widget, context):
+        if not self.server_drag_alias:
+            Gtk.drag_cancel(context)
+
+    def clear_server_drop(self, row, *_):
+        style = row.get_style_context()
+        style.remove_class("server-drop-before")
+        style.remove_class("server-drop-after")
+
+    def server_drag_motion(self, row, context, x, y, timestamp):
+        self.clear_server_drop(row)
+        row.get_style_context().add_class(
+            "server-drop-before" if y < row.get_allocated_height() / 2 else "server-drop-after")
+        return False
+
+    def server_dropped(self, row, context, x, y, data, info, timestamp):
+        self.clear_server_drop(row)
+        source = bytes(data.get_data()).decode("ascii")
+        success = self.reorder_server(source, row.alias, y >= row.get_allocated_height() / 2)
+        Gtk.drag_finish(context, success, False, timestamp)
+
+    def reorder_server(self, source, target, after):
+        if source not in self.aliases or target not in self.aliases:
+            return False
+        if source == target:
+            return True
+        aliases = self.aliases.copy()
+        aliases.remove(source)
+        index = aliases.index(target) + int(after)
+        aliases.insert(index, source)
+        if aliases == self.aliases:
+            return True
+        if not self.persist(aliases):
+            return False
+        # Move only the sidebar row. Blocking selection callbacks prevents GTK
+        # from opening another connection while the selected row is reinserted.
+        selected = self.server_list.get_selected_row()
+        row = self.rows[source]
+        self.server_list.handler_block_by_func(self.selected)
+        try:
+            # GTK retains the row's selected flag after removal, so clear it
+            # first to let select_row restore the list's selected-row pointer.
+            self.server_list.unselect_row(row)
+            self.server_list.remove(row)
+            self.server_list.insert(row, index + 1)  # Local terminal stays first.
+            row.show_all()
+            self.server_list.select_row(selected)
+        finally:
+            self.server_list.handler_unblock_by_func(self.selected)
+        return True
+
     def add_dialog(self):
-        return ServerDialog(self)
+        if self.server_dialog is None:
+            self.server_dialog = ServerDialog(self)
+        self.server_dialog.present()
+        return self.server_dialog
+
+    def edit_dialog(self, alias):
+        if alias not in self.aliases:
+            return None
+        if alias not in self.server_editors:
+            self.server_editors[alias] = ServerDialog(self, alias)
+        self.server_editors[alias].present()
+        return self.server_editors[alias]
 
     def selected(self, widget, row):
         if row is None:
@@ -977,7 +1218,7 @@ class Window(Gtk.ApplicationWindow):
         if profile and profile.get("password_saved"):
             def clear_secret():
                 try:
-                    credentials.delete_password(alias)
+                    credentials.delete_password(profile.get("credential_id", alias))
                 except Exception:
                     if not self.quota_closed:
                         GLib.idle_add(self.info, "钥匙环条目未移除",

@@ -40,7 +40,7 @@ def ssh_environment(server_id, profile, background=False):
     if not profile or not profile.get("password_saved"):
         return {}
     return {"SSH_ASKPASS": str(Path(__file__).resolve()), "SSH_ASKPASS_REQUIRE": "force",
-            "ZTERM_SERVER_ID": server_id, "ZTERM_SSH_USER": profile["username"],
+            "ZTERM_SERVER_ID": profile.get("credential_id", server_id), "ZTERM_SSH_USER": profile["username"],
             "ZTERM_SSH_HOST": profile["host"], "ZTERM_SSH_BACKGROUND": "1" if background else "0"}
 
 
