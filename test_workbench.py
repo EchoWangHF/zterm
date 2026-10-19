@@ -204,6 +204,429 @@ class ModelTests(unittest.TestCase):
 
 
 class TerminalTests(unittest.TestCase):
+    def test_server_context_edit_preserves_running_sessions_and_order(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        from app import Window, Gtk
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = AliasStore(Path(directory) / "servers.json")
+            profile = {"name": "原服务器", "host": "192.0.2.10", "username": "old-user",
+                       "port": 22, "password_saved": False}
+            store.save(["server-a", "server-b"], {"server-a": profile})
+            window = Window(store=store, enable_quota=False, command_factory=lambda _: ["/bin/cat"])
+            try:
+                pump_until(lambda: window.rows["server-a"].get_allocated_height() > 1)
+                row = window.rows["server-a"]
+                event = SimpleNamespace(button=3, y=row.get_allocation().y + 4)
+                menu = Mock()
+                with patch.object(window, "server_context_menu", return_value=menu) as create:
+                    self.assertTrue(window.server_drag_pressed(window.server_list, event))
+                    create.assert_called_once_with("server-a")
+                    menu.popup_at_pointer.assert_called_once_with(event)
+                self.assertIsNone(window.current)
+                self.assertEqual(window.groups, {})
+                menu = window.server_context_menu("server-a")
+                self.assertEqual(menu.get_children()[0].get_label(), "编辑服务器")
+                menu.get_children()[0].activate()
+                menu.destroy()
+                dialog = window.server_editors["server-a"]
+                self.assertIs(window.edit_dialog("server-a"), dialog)
+                self.assertEqual(dialog.username.get_text(), "old-user")
+                self.assertEqual(dialog.password.get_text(), "")
+                self.assertFalse(dialog.get_modal())
+                self.assertIsNone(dialog.get_transient_for())
+                window.server_list.select_row(row)
+                pump_until(lambda: window.current_session().alive)
+                window.new_session()
+                pump_until(lambda: window.current_session().alive)
+                sessions = list(window.groups["server-a"].get_children())
+                pids = [session.pid for session in sessions]
+                window.command_factory = window.default_command
+                dialog.name.set_text("新别名")
+                dialog.host.set_text("2001:db8::2")
+                dialog.username.set_text("zhouyawei")
+                dialog.port.set_value(2222)
+                dialog.response(Gtk.ResponseType.OK)
+                pump_until(lambda: not dialog.busy)
+                self.assertTrue(dialog.closed)
+                self.assertEqual(window.aliases, ["server-a", "server-b"])
+                self.assertEqual(store.load(), window.aliases)
+                self.assertIs(window.rows["server-a"], row)
+                self.assertEqual(row.get_child().get_text(), "新别名")
+                self.assertEqual(window.header.get_title(), "新别名")
+                self.assertEqual(window.connection_label.get_text(), "新别名 · 在线")
+                self.assertEqual([session.pid for session in sessions], pids)
+                self.assertTrue(all(session.alive for session in sessions))
+                expected = server_ssh_command(window.profiles["server-a"])
+                self.assertTrue(all(session.argv == expected for session in sessions))
+                self.assertEqual(window.default_command("server-a"), expected)
+                window.search.set_text("2001:db8::2")
+                window.server_list.invalidate_filter()
+                self.assertTrue(row.get_child_visible())
+                self.assertFalse(window.rows["server-b"].get_child_visible())
+            finally:
+                window.destroy()
+
+    def test_edit_password_keep_replace_clear_and_rollback(self):
+        from unittest.mock import patch
+        from app import Window, Gtk
+
+        for old_key in ("server-a", "password-existing"):
+            with self.subTest(old_key=old_key), tempfile.TemporaryDirectory() as directory:
+                store = AliasStore(Path(directory) / "servers.json")
+                profile = {"name": "开发服务器", "host": "192.0.2.10", "username": "zhouyawei",
+                           "port": 22, "password_saved": True}
+                if old_key != "server-a":
+                    profile["credential_id"] = old_key
+                store.save(["server-a"], {"server-a": profile})
+                window = Window(store=store, enable_quota=False)
+                try:
+                    with patch("app.credentials.save_password") as save, \
+                            patch("app.credentials.delete_password") as delete:
+                        dialog = window.edit_dialog("server-a")
+                        self.assertTrue(dialog.clear_password.get_visible())
+                        dialog.response(Gtk.ResponseType.OK)
+                        pump_until(lambda: not dialog.busy)
+                        self.assertTrue(dialog.closed)
+                        self.assertEqual(window.profiles["server-a"], profile)
+                        save.assert_not_called()
+                        delete.assert_not_called()
+                        dialog = window.edit_dialog("server-a")
+                        dialog.password.set_text("new-test-password")
+                        before = store.path.read_bytes()
+                        with patch.object(store, "save", side_effect=OSError("read only")):
+                            dialog.response(Gtk.ResponseType.OK)
+                            pump_until(lambda: not dialog.busy)
+                        staged_key = save.call_args.args[0]
+                        self.assertNotEqual(staged_key, old_key)
+                        delete.assert_called_once_with(staged_key)
+                        self.assertEqual(store.path.read_bytes(), before)
+                        self.assertEqual(window.profiles["server-a"], profile)
+                        save.reset_mock()
+                        delete.reset_mock()
+
+                        def cleanup(key):
+                            # Old secret is removed only after the new reference is durable.
+                            self.assertEqual(key, old_key)
+                            stored = json.loads(store.path.read_text())["servers"]["server-a"]
+                            self.assertEqual(stored["credential_id"], save.call_args.args[0])
+                        delete.side_effect = cleanup
+                        dialog.response(Gtk.ResponseType.OK)
+                        pump_until(lambda: not dialog.busy)
+                        self.assertTrue(dialog.closed)
+                        replacement = save.call_args.args[0]
+                        self.assertEqual(window.profiles["server-a"]["credential_id"], replacement)
+                        delete.assert_called_once_with(old_key)
+                        self.assertNotIn("new-test-password", store.path.read_text())
+                        save.reset_mock()
+                        delete.reset_mock()
+                        delete.side_effect = None
+                        dialog = window.edit_dialog("server-a")
+                        dialog.clear_password.set_active(True)
+                        self.assertFalse(dialog.password.get_sensitive())
+                        dialog.response(Gtk.ResponseType.OK)
+                        pump_until(lambda: not dialog.busy)
+                        self.assertFalse(window.profiles["server-a"]["password_saved"])
+                        self.assertNotIn("credential_id", window.profiles["server-a"])
+                        save.assert_not_called()
+                        delete.assert_called_once_with(replacement)
+                finally:
+                    window.destroy()
+
+    def test_edit_password_keyring_failure_and_removal_use_current_reference(self):
+        from unittest.mock import patch
+        from app import Window, Gtk
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = AliasStore(Path(directory) / "servers.json")
+            profile = {"name": "服务器", "host": "192.0.2.10", "username": "zhouyawei", "port": 22,
+                       "password_saved": True, "credential_id": "password-existing"}
+            store.save(["server-a"], {"server-a": profile})
+            window = Window(store=store, enable_quota=False)
+            try:
+                dialog = window.edit_dialog("server-a")
+                dialog.password.set_text("test-only-password")
+                with patch("app.credentials.save_password", side_effect=RuntimeError("locked")), \
+                        patch("app.credentials.delete_password") as delete:
+                    dialog.response(Gtk.ResponseType.OK)
+                    pump_until(lambda: not dialog.busy)
+                    self.assertFalse(dialog.closed)
+                    self.assertEqual(window.profiles["server-a"], profile)
+                    delete.assert_not_called()
+                    window.current = "server-a"
+                    window.remove_alias()
+                    pump_until(lambda: delete.called)
+                    delete.assert_called_once_with("password-existing")
+                    dialog.response(Gtk.ResponseType.OK)
+                    self.assertIn("已被移除", dialog.error_label.get_text())
+                    self.assertEqual(store.load(), [])
+            finally:
+                window.destroy()
+
+    def test_edit_during_async_save_does_not_resurrect_or_overwrite(self):
+        import threading
+        from unittest.mock import patch
+        from app import Window, Gtk
+
+        for action in ("remove", "close", "duplicate"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as directory:
+                store = AliasStore(Path(directory) / "servers.json")
+                profile = {"name": "原服务器", "host": "192.0.2.10", "username": "zhouyawei",
+                           "port": 22, "password_saved": False}
+                store.save(["server-a"], {"server-a": profile})
+                window = Window(store=store, enable_quota=False)
+                dialog = window.edit_dialog("server-a")
+                dialog.name.set_text("新别名")
+                dialog.password.set_text("test-only-password")
+                started, proceed = threading.Event(), threading.Event()
+
+                def save_password(*_):
+                    started.set()
+                    if not proceed.wait(5):
+                        raise RuntimeError("worker timeout")
+                try:
+                    with patch("app.credentials.save_password", side_effect=save_password) as save, \
+                            patch("app.credentials.delete_password") as delete:
+                        dialog.response(Gtk.ResponseType.OK)
+                        pump_until(started.is_set)
+                        if action == "close":
+                            window.destroy()
+                        elif action == "remove":
+                            window.current = "server-a"
+                            window.remove_alias()
+                        else:
+                            window.aliases.append("server-b")
+                            window.profiles["server-b"] = dict(profile, name="新别名")
+                            store.save(window.aliases, window.profiles)
+                            window.add_row("server-b")
+                        proceed.set()
+                        pump_until(lambda: not dialog.busy)
+                        delete.assert_called_once_with(save.call_args.args[0])
+                        self.assertEqual(store.load(), [] if action == "remove" else
+                                         ["server-a", "server-b"] if action == "duplicate" else ["server-a"])
+                        if action != "remove":
+                            self.assertEqual(store.profiles["server-a"], profile)
+                finally:
+                    proceed.set()
+                    window.destroy()
+
+    def test_legacy_editor_prefills_effective_ssh_options(self):
+        from unittest.mock import patch
+        from app import Window, Gtk
+        from model import legacy_server_profile
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "ssh_config"
+            config.write_text("Host old-server\n HostName 192.0.2.10\n User cambricon\n Port 2222\n")
+            command = ["/usr/bin/ssh", "-F", str(config), "-l", "zhouyawei", "old-server"]
+            store = AliasStore(Path(directory) / "servers.json")
+            store.save(["old-server"])
+            window = Window(store=store, enable_quota=False)
+            try:
+                with patch("model.ssh_command", return_value=command):
+                    profile = legacy_server_profile("old-server")
+                    self.assertEqual(profile["username"], "zhouyawei")
+                    dialog = window.edit_dialog("old-server")
+                    pump_until(lambda: not dialog.loading)
+                self.assertEqual(dialog.host.get_text(), "192.0.2.10")
+                self.assertEqual(dialog.port.get_value_as_int(), 2222)
+                self.assertEqual(dialog.username.get_text(), "zhouyawei")
+                dialog.response(Gtk.ResponseType.OK)
+                pump_until(lambda: not dialog.busy)
+                self.assertEqual(store.load(), ["old-server"])
+                self.assertEqual(store.profiles["old-server"], profile)
+            finally:
+                window.destroy()
+
+    def test_quota_result_for_old_profile_is_discarded_after_edit(self):
+        from unittest.mock import patch
+        from app import Window
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = AliasStore(Path(directory) / "servers.json")
+            old = {"name": "服务器", "host": "192.0.2.10", "username": "old-user", "port": 22}
+            store.save(["server-a"], {"server-a": old})
+            window = Window(store=store, enable_quota=False)
+            try:
+                window.profiles["server-a"] = dict(old, username="new-user")
+                window.quota_busy = True
+                with patch.object(window, "refresh_quota") as refresh:
+                    window.quota_received("server-a", {"status": "old account"}, old)
+                    self.assertNotIn("server-a", window.quota_cache)
+                    self.assertFalse(window.quota_busy)
+                    refresh.assert_called_once_with()
+            finally:
+                window.destroy()
+
+    def test_server_drag_order_persists_and_preserves_sessions(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from app import Window
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = AliasStore(Path(directory) / "servers.json")
+            profiles = {
+                "server-a": {"name": "组 A", "host": "192.0.2.10", "username": "test-user", "port": 22},
+                "server-b": {"name": "隐藏节点", "host": "192.0.2.11", "username": "test-user", "port": 2222},
+                "server-c": {"name": "组 C", "host": "192.0.2.12", "username": "test-user", "port": 22},
+            }
+            store.save(list(profiles), profiles)
+            window = Window(store=store, enable_quota=False, command_factory=lambda _: ["/bin/cat"])
+            window.confirm = lambda *_: True
+            reopened = None
+            try:
+                window.server_list.select_row(window.rows["server-c"])
+                c_session = window.current_session()
+                window.server_list.select_row(window.rows["server-a"])
+                first = window.current_session()
+                second = window.new_session()
+                sessions = [c_session, first, second]
+                pump_until(lambda: all(session.alive for session in sessions)
+                           and window.rows["server-a"].get_allocated_height() > 1)
+                pids = [session.pid for session in sessions]
+
+                def drop(source, target, after=False):
+                    row = window.rows[target]
+                    data = SimpleNamespace(get_data=lambda: source.encode("ascii"))
+                    with patch("app.Gtk.drag_finish") as finish:
+                        window.server_dropped(row, object(), 0,
+                                              row.get_allocated_height() if after else 0, data, 0, 0)
+                        self.assertTrue(finish.call_args.args[1])
+
+                def assert_order(expected):
+                    self.assertEqual(window.aliases, expected)
+                    self.assertEqual([row.alias for row in window.server_list.get_children()], [""] + expected)
+                    self.assertEqual(store.load(), expected)
+                    self.assertEqual(store.profiles, profiles)
+                    self.assertEqual(window.current, "server-a")
+                    self.assertIs(window.server_list.get_selected_row(), window.rows["server-a"])
+                    self.assertIs(window.current_session(), second)
+                    self.assertEqual([session.pid for session in sessions], pids)
+                    self.assertTrue(all(session.alive for session in sessions))
+
+                drop("server-c", "server-a")
+                assert_order(["server-c", "server-a", "server-b"])
+                drop("server-a", "server-b", after=True)
+                assert_order(["server-c", "server-b", "server-a"])
+                window.search.set_text("组")
+                window.server_list.invalidate_filter()
+                self.assertFalse(window.rows["server-b"].get_child_visible())
+                drop("server-c", "server-a", after=True)
+                assert_order(["server-b", "server-a", "server-c"])
+                self.assertFalse(window.rows["server-b"].get_child_visible())
+                window.search.set_text("")
+                window.server_list.invalidate_filter()
+                reopened = Window(store=AliasStore(store.path), enable_quota=False)
+                self.assertEqual([row.alias for row in reopened.server_list.get_children()],
+                                 ["", "server-b", "server-a", "server-c"])
+                self.assertEqual(reopened.groups, {})
+                before = store.path.read_bytes()
+                with patch.object(store, "save", side_effect=OSError("read only")), \
+                        patch.object(window, "info") as info:
+                    self.assertFalse(window.reorder_server("server-a", "server-b", False))
+                    info.assert_called_once()
+                self.assertEqual(store.path.read_bytes(), before)
+                assert_order(["server-b", "server-a", "server-c"])
+                for source, target in (("", "server-a"), ("server-a", ""), ("removed-server", "server-a")):
+                    self.assertFalse(window.reorder_server(source, target, False))
+                self.assertTrue(window.reorder_server("server-a", "server-a", False))
+            finally:
+                if reopened is not None:
+                    reopened.destroy()
+                window.close_window()
+                window.destroy()
+
+    def test_independent_server_save_handles_main_window_changes(self):
+        import threading
+        from unittest.mock import Mock, patch
+        from app import Window, Gtk
+
+        for close_owner in (False, True):
+            with self.subTest(close_owner=close_owner), tempfile.TemporaryDirectory() as directory:
+                store = AliasStore(Path(directory) / "servers.json")
+                store.save(["legacy-server"])
+                window = Window(store=store, enable_quota=False)
+                dialog = window.add_dialog()
+                dialog.host.set_text("192.0.2.10")
+                dialog.username.set_text("test-user")
+                dialog.password.set_text("test-only-password")
+                started, proceed = threading.Event(), threading.Event()
+                application = Mock()
+
+                def save_password(*_):
+                    started.set()
+                    if not proceed.wait(5):
+                        raise RuntimeError("Test did not release the keyring worker")
+
+                try:
+                    with patch("app.credentials.save_password", side_effect=save_password) as save, \
+                            patch("app.credentials.delete_password") as delete, \
+                            patch.object(window, "get_application", return_value=application):
+                        dialog.response(Gtk.ResponseType.OK)
+                        pump_until(started.is_set)
+                        if close_owner:
+                            window.destroy()
+                            self.assertTrue(dialog.closed)
+                        else:
+                            window.current = "legacy-server"
+                            window.remove_alias()
+                            self.assertEqual(store.load(), [])
+                        proceed.set()
+                        pump_until(lambda: not dialog.busy)
+                        application.hold.assert_called_once_with()
+                        application.release.assert_called_once_with()
+                        if close_owner:
+                            self.assertEqual(store.load(), ["legacy-server"])
+                            delete.assert_called_once_with(save.call_args.args[0])
+                        else:
+                            self.assertEqual(store.load(), [save.call_args.args[0]])
+                            self.assertEqual(window.aliases, store.load())
+                            delete.assert_not_called()
+                finally:
+                    proceed.set()
+                    window.destroy()
+
+    def test_add_server_window_is_independent_and_reused(self):
+        from app import Window, Gdk, Gtk
+
+        with tempfile.TemporaryDirectory() as directory:
+            window = Window(store=AliasStore(Path(directory) / "servers.json"), enable_quota=False,
+                            command_factory=lambda _: ["/bin/cat"])
+            window.confirm = lambda *_: True
+            try:
+                window.server_list.select_row(window.rows[""])
+                session = window.current_session()
+                pump_until(lambda: session.alive and window.get_allocated_width() > 100)
+                main_size = window.get_size()
+                pid = session.pid
+                dialog = window.add_dialog()
+                self.assertFalse(dialog.get_modal())
+                self.assertIsNone(dialog.get_transient_for())
+                self.assertEqual(dialog.get_type_hint(), Gdk.WindowTypeHint.NORMAL)
+                self.assertIs(window.add_dialog(), dialog)
+                dialog.host.set_text("192.0.2.10")
+                self.assertIs(window.add_dialog(), dialog)
+                self.assertEqual(dialog.host.get_text(), "192.0.2.10")
+                dialog.move(80, 80)
+                dialog.resize(480, 440)
+                pump_until(lambda: dialog.get_size().width >= 480)
+                self.assertEqual(window.get_size(), main_size)
+                second = window.new_session()
+                pump_until(lambda: second.alive)
+                dialog.response(Gtk.ResponseType.CANCEL)
+                self.assertTrue(dialog.closed)
+                self.assertEqual(session.pid, pid)
+                self.assertTrue(session.alive)
+                replacement = window.add_dialog()
+                self.assertIsNot(replacement, dialog)
+                window.close_window()
+                window.destroy()
+                self.assertTrue(replacement.closed)
+            finally:
+                window.close_window()
+                window.destroy()
+
     def test_tab_numbers_follow_positions_and_alt_shortcuts(self):
         from types import SimpleNamespace
         from unittest.mock import patch

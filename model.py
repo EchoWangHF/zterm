@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import subprocess
 import tempfile
 
 
@@ -100,7 +101,7 @@ def bash_ssh_aliases(path=None):
 def validate_server(profile):
     if (not isinstance(profile, dict)
             or not {"name", "host", "username", "port"}.issubset(profile)
-            or set(profile) - {"name", "host", "username", "port", "password_saved"}
+            or set(profile) - {"name", "host", "username", "port", "password_saved", "credential_id"}
             or not isinstance(profile["name"], str) or not 1 <= len(profile["name"].strip()) <= 80
             or any(ord(char) < 32 or ord(char) == 127 for char in profile["name"])
             or not isinstance(profile["host"], str)
@@ -108,6 +109,10 @@ def validate_server(profile):
             or type(profile["port"]) is not int or not 1 <= profile["port"] <= 65535
             or type(profile.get("password_saved", False)) is not bool):
         raise ValueError("服务器信息无效：请填写别名、IP、用户名和 1–65535 的端口。")
+    if "credential_id" in profile and (not profile.get("password_saved")
+            or not isinstance(profile["credential_id"], str)
+            or not valid_alias(profile["credential_id"])):
+        raise ValueError("密码引用无效。")
     try:
         ipaddress.ip_address(profile["host"])
     except ValueError:
@@ -318,3 +323,13 @@ def server_ssh_command(profile):
         command += ["-oBatchMode=no", "-oPreferredAuthentications=publickey,password",
                     "-oNumberOfPasswordPrompts=1"]
     return command + [profile["host"]]
+
+
+def legacy_server_profile(alias):
+    """Resolve existing SSH options locally without starting a connection."""
+    command = ssh_command(alias)
+    result = subprocess.run(command[:1] + ["-G"] + command[1:],
+                            capture_output=True, text=True, check=True, timeout=5)
+    options = dict(line.split(" ", 1) for line in result.stdout.splitlines() if " " in line)
+    return {"name": alias, "host": options["hostname"], "username": options["user"],
+            "port": int(options["port"]), "password_saved": False}
