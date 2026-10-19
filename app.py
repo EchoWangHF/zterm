@@ -7,6 +7,7 @@ import pwd
 import sys
 import threading
 import time
+import uuid
 
 import gi
 
@@ -16,7 +17,9 @@ gi.require_version("Vte", "2.91")
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango, Vte
 
 from model import (AliasStore, AppearanceStore, THEMES, INTERFACE_THEMES,
-                   default_appearance, discover_aliases, interface_colors, ssh_command, valid_alias)
+                   bash_ssh_aliases, default_appearance, interface_colors, ssh_command,
+                   server_ssh_command, validate_server)
+import credentials
 from quota import fetch as fetch_quota, display as display_quota
 
 
@@ -222,6 +225,116 @@ class AppearanceDialog(Gtk.Dialog):
             self.destroy()
 
 
+class ServerDialog(Gtk.Dialog):
+    def __init__(self, owner):
+        super().__init__(title="添加服务器", transient_for=owner, modal=True, destroy_with_parent=True)
+        self.owner, self.busy, self.closed = owner, False, False
+        owner.interface_style.attach(self)
+        self.add_buttons("取消", Gtk.ResponseType.CANCEL, "保存", Gtk.ResponseType.OK)
+        self.set_default_response(Gtk.ResponseType.OK)
+        content = self.get_content_area()
+        content.set_border_width(20)
+        content.set_spacing(12)
+        self.grid = Gtk.Grid(column_spacing=16, row_spacing=12)
+        content.add(self.grid)
+        self.name = Gtk.Entry(placeholder_text="例如：开发服务器（留空使用 IP）", activates_default=True)
+        self.host = Gtk.Entry(placeholder_text="IPv4 或 IPv6 地址", activates_default=True)
+        self.username = Gtk.Entry(placeholder_text="服务器登录用户名", activates_default=True)
+        self.password = Gtk.Entry(visibility=False, placeholder_text="留空使用 SSH 密钥", activates_default=True)
+        self.port = Gtk.SpinButton.new_with_range(1, 65535, 1)
+        self.port.set_numeric(True)
+        self.port.set_value(22)
+        try:
+            users = {item["user"] for item in bash_ssh_aliases().values() if item["user"]}
+        except (OSError, UnicodeError):
+            users = set()
+        if len(users) == 1:
+            self.username.set_text(users.pop())
+        for index, (label, widget) in enumerate([
+                ("显示别名", self.name), ("IP 地址", self.host), ("用户名", self.username),
+                ("密码", self.password), ("端口", self.port)]):
+            self.grid.attach(Gtk.Label(label=label, xalign=0), 0, index, 1, 1)
+            widget.set_hexpand(True)
+            self.grid.attach(widget, 1, index, 1, 1)
+        content.add(Gtk.Label(label="别名显示在左侧服务器栏和窗口标题。\n"
+                                   "密码保存在系统钥匙环；留空可使用已有免密登录。", xalign=0))
+        self.error_label = Gtk.Label(xalign=0, wrap=True, max_width_chars=52)
+        content.add(self.error_label)
+        self.connect("response", self.respond)
+        self.connect("delete-event", lambda *_: self.busy)
+        self.connect("destroy", self.on_destroy)
+        self.show_all()
+
+    def on_destroy(self, *_):
+        self.closed = True
+
+    def respond(self, _, response):
+        if self.busy:
+            return
+        if response != Gtk.ResponseType.OK:
+            self.destroy()
+            return
+        host = self.host.get_text().strip()
+        password = self.password.get_text()
+        try:
+            profile = validate_server({"name": self.name.get_text().strip() or host, "host": host,
+                                       "username": self.username.get_text().strip(),
+                                       "port": self.port.get_value_as_int(),
+                                       "password_saved": bool(password)})
+            if any(char in password for char in "\r\n\0"):
+                raise ValueError("密码不能包含换行或空字符。")
+            if profile["name"] in [self.owner.display_name(alias) for alias in self.owner.aliases]:
+                raise ValueError("该显示别名已存在，请使用不同的名字。")
+            if self.owner.load_error:
+                raise ValueError("请先修复现有服务器配置并重新启动，避免覆盖原有数据。")
+        except ValueError as error:
+            self.error_label.set_text(str(error))
+            return
+        server_id = "server-" + uuid.uuid4().hex
+        aliases = self.owner.aliases + [server_id]
+        profiles = dict(self.owner.profiles, **{server_id: profile})
+        self.busy = True
+        self.grid.set_sensitive(False)
+        self.set_response_sensitive(Gtk.ResponseType.OK, False)
+        self.set_response_sensitive(Gtk.ResponseType.CANCEL, False)
+        self.error_label.set_text("正在保存…如系统提示，请解锁钥匙环。")
+
+        def work():
+            error = None
+            saved_secret = False
+            try:
+                if password:
+                    credentials.save_password(server_id, profile["name"], password)
+                    saved_secret = True
+                self.owner.store.save(aliases, profiles)
+            except Exception:
+                error = "保存失败，请检查配置目录权限及系统钥匙环是否可用、已解锁。"
+                if saved_secret:
+                    try:
+                        credentials.delete_password(server_id)
+                    except Exception:
+                        error += "\n钥匙环中的残留条目未能清除，可在“密码和密钥”中移除 zTerm · " + profile["name"] + "。"
+            GLib.idle_add(self.finished, server_id, aliases, profiles, error)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def finished(self, server_id, aliases, profiles, error):
+        if self.closed:
+            return False
+        self.busy = False
+        if error:
+            self.error_label.set_text(error)
+            self.grid.set_sensitive(True)
+            self.set_response_sensitive(Gtk.ResponseType.OK, True)
+            self.set_response_sensitive(Gtk.ResponseType.CANCEL, True)
+        else:
+            self.owner.aliases, self.owner.profiles = aliases, profiles
+            self.owner.add_row(server_id)
+            self.password.set_text("")
+            self.destroy()
+        return False
+
+
 class Session(Gtk.Box):
     def __init__(self, window, alias, number, argv):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
@@ -230,7 +343,9 @@ class Session(Gtk.Box):
         self.pending = False
         self.closed = False
         self.pid = None
+        # number is a stable drag identity; tab_title follows the page position.
         self.tab_title = f"[{number}]"
+        self.tab_suffix = ""
         self.tab_label = Gtk.Label(label=self.tab_title)
         self.tab_label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         self.tab_label.set_width_chars(min(len(self.tab_title), 32))
@@ -260,16 +375,27 @@ class Session(Gtk.Box):
     def active(self):
         return self.alive or self.pending
 
+    def set_tab_position(self, position):
+        self.tab_title = f"[{position}]"
+        self.refresh_tab_label()
+
+    def refresh_tab_label(self):
+        self.tab_label.set_text(self.tab_title + self.tab_suffix)
+        self.tab_label.set_width_chars(min(len(self.tab_title), 32))
+        self.title_changed(self.terminal)
+
     def start(self):
         if self.closed or self.active:
             return
         self.pending = True
         self.pid = None
         self.cancel = Gio.Cancellable()
-        self.status_detail = "正在启动 " + (self.alias or "本地终端") + "…"
-        self.tab_label.set_text(self.tab_title)
+        self.status_detail = "正在启动 " + self.window.display_name(self.alias) + "…"
+        self.tab_suffix = ""
+        self.refresh_tab_label()
         self.window.render_status()
         env = dict(os.environ, TERM="xterm-256color", COLORTERM="truecolor")
+        env.update(credentials.ssh_environment(self.alias, self.window.profiles.get(self.alias)))
         try:
             self.terminal.spawn_async(
                 Vte.PtyFlags.DEFAULT, str(Path.home()), self.argv,
@@ -284,11 +410,12 @@ class Session(Gtk.Box):
             return
         if error:
             self.status_detail = "启动失败：" + error.message
-            self.tab_label.set_text(self.tab_title + " · 失败")
+            self.tab_suffix = " · 失败"
+            self.refresh_tab_label()
         else:
             self.pid = pid
             self.alive = True
-            self.status_detail = (self.alias or "本地终端") + " · 会话运行中"
+            self.status_detail = self.window.display_name(self.alias) + " · 会话运行中"
             terminal.grab_focus()
         self.window.render_status()
 
@@ -299,7 +426,8 @@ class Session(Gtk.Box):
             return
         code = os.waitstatus_to_exitcode(status)
         self.status_detail = f"会话已结束 · 退出码 {code} · 输出已保留"
-        self.tab_label.set_text(self.tab_title + " · 已结束")
+        self.tab_suffix = " · 已结束"
+        self.refresh_tab_label()
         self.window.render_status()
 
     def title_changed(self, terminal):
@@ -412,6 +540,7 @@ class SessionNotebook(Gtk.Notebook):
                        data.set(data.get_target(), 8, str(session.number).encode()))
         select.connect("drag-data-received", self.tab_dropped, session)
         row.show_all()
+        self.renumber_tabs()
         self.sync_selection(self.get_nth_page(self.get_current_page()))
 
     def select_session(self, session):
@@ -457,10 +586,16 @@ class SessionNotebook(Gtk.Notebook):
     def page_removed(self, notebook, session, index):
         row, select = self.tabs.pop(session)
         row.destroy()
+        self.renumber_tabs()
+
+    def renumber_tabs(self):
+        for index in range(self.get_n_pages()):
+            self.get_nth_page(index).set_tab_position(index + 1)
 
     def page_reordered(self, notebook, session, index):
         self.tab_strip.reorder_child(self.tabs[session][0], index)
         self.tab_strip.reorder_child(self.add_button, -1)
+        self.renumber_tabs()
         self.reveal_current()
 
     def tab_dropped(self, widget, context, x, y, data, info, timestamp, target):
@@ -500,6 +635,7 @@ class Window(Gtk.ApplicationWindow):
         except (OSError, ValueError) as error:
             self.aliases = []
             self.load_error = str(error)
+        self.profiles = dict(self.store.profiles)
         header = Gtk.HeaderBar(title="zTerm")
         self.header = header
         header.set_show_close_button(True)
@@ -512,7 +648,6 @@ class Window(Gtk.ApplicationWindow):
         self.settings_menu = Gtk.Menu()
         self.interface_style.attach(self.settings_menu)
         for label, callback in [("添加服务器", lambda _: self.add_dialog()),
-                                ("导入别名", lambda _: self.import_aliases()),
                                 ("快捷键", lambda _: self.show_shortcuts()),
                                 ("外观设置", lambda _: AppearanceDialog(self)),
                                 ("订阅额度", lambda _: self.quota_settings())]:
@@ -556,12 +691,14 @@ class Window(Gtk.ApplicationWindow):
         side.get_style_context().add_class("workspace-sidebar")
         side.set_size_request(170, -1)
         side.pack_start(Gtk.Label(label="服务器", xalign=0), False, False, 4)
-        self.search = Gtk.SearchEntry(placeholder_text="搜索 SSH 别名")
+        self.search = Gtk.SearchEntry(placeholder_text="搜索别名或 IP")
         self.search.connect("search-changed", lambda _: self.server_list.invalidate_filter())
         side.pack_start(self.search, False, False, 0)
         self.server_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE)
         self.server_list.set_filter_func(lambda row: not row.alias or
-                                        self.search.get_text().lower() in row.alias.lower())
+                                        self.search.get_text().lower() in
+                                        (self.display_name(row.alias) + " " +
+                                         self.profiles.get(row.alias, {}).get("host", "")).lower())
         self.server_list.connect("row-selected", self.selected)
         scroll = Gtk.ScrolledWindow()
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
@@ -578,7 +715,7 @@ class Window(Gtk.ApplicationWindow):
         welcome.pack_start(Gtk.Image.new_from_pixbuf(
             self.get_icon().scale_simple(64, 64, GdkPixbuf.InterpType.BILINEAR)), False, False, 0)
         welcome.pack_start(Gtk.Label(label="你的服务器，一个工作台"), False, False, 0)
-        welcome.pack_start(Gtk.Label(label="在右上角“设置”中添加服务器或导入 SSH 别名。\n"
+        welcome.pack_start(Gtk.Label(label="在右上角“设置”中添加服务器。\n"
                                     "选择服务器后，用最后一个标签后的 ＋ 打开更多会话。\n"
                                     "切换服务器会保留当前连接。", justify=Gtk.Justification.CENTER), False, False, 0)
         self.stack.add_named(welcome, "welcome")
@@ -621,7 +758,7 @@ class Window(Gtk.ApplicationWindow):
 
     def render_status(self, session=None):
         session = session or self.current_session()
-        server = self.current or "本地终端"
+        server = self.display_name(self.current)
         if session is None:
             text = "未选择服务器" if self.current is None else server + " · 无会话"
             detail = None
@@ -655,7 +792,7 @@ class Window(Gtk.ApplicationWindow):
             self.quota_label.set_tooltip_text(None)
             return
         record = self.quota_cache.get(self.current)
-        server = self.current or "本地终端"
+        server = self.display_name(self.current)
         if record is None:
             text = "Codex · 正在查询 " + server
         elif "error" in record:
@@ -679,9 +816,10 @@ class Window(Gtk.ApplicationWindow):
             return
         self.quota_busy = True
         self.quota_refresh.set_sensitive(False)
+        profile = self.profiles.get(alias)
 
         def work():
-            result = fetch_quota(alias)
+            result = fetch_quota(alias, profile)
             if not self.quota_closed:
                 GLib.idle_add(self.quota_received, alias, result)
 
@@ -701,7 +839,8 @@ class Window(Gtk.ApplicationWindow):
     def quota_settings(self):
         self.info("Codex 订阅额度", "底栏显示当前所选机器上的 Codex 订阅使用比例和重置时间。\n"
                   "请在该机器安装 codex CLI，并使用订阅账号登录。\n"
-                  "远端查询需要 Python 3.9+ 和免交互 SSH 登录（如密钥或 agent）。\n"
+                  "远端需要 Python 3.9+，使用密钥、agent 或已存入解锁钥匙环的密码。\n"
+                  "请先连接一次并确认服务器主机密钥；后台查询不会弹出登录提示。\n"
                   "每 5 分钟自动刷新，也可点击底栏右侧 ↻。\n"
                   "重置时间按本机时区显示，悬停可查看数据时间。")
 
@@ -718,8 +857,12 @@ class Window(Gtk.ApplicationWindow):
                 apply_appearance(session.terminal, settings)
                 session.terminal.set_font_scale(1.0)
 
-    @staticmethod
-    def default_command(alias):
+    def display_name(self, alias):
+        return self.profiles[alias]["name"] if alias in self.profiles else alias or "本地终端"
+
+    def default_command(self, alias):
+        if alias in self.profiles:
+            return server_ssh_command(self.profiles[alias])
         return ssh_command(alias) if alias else [pwd.getpwuid(os.getuid()).pw_shell or "/bin/bash", "-l"]
 
     def info(self, title, message):
@@ -752,60 +895,24 @@ class Window(Gtk.ApplicationWindow):
             self.info("保存失败", str(error))
             return False
         self.aliases = aliases
+        self.profiles = dict(self.store.profiles)
         return True
 
     def add_row(self, alias):
         row = Gtk.ListBoxRow()
         row.alias = alias
-        label = Gtk.Label(label=alias or "本地终端", xalign=0, margin=12)
+        label = Gtk.Label(label=self.display_name(alias), xalign=0, margin=12)
         label.set_ellipsize(Pango.EllipsizeMode.END)
         row.add(label)
-        row.set_tooltip_text("ssh " + alias if alias else "本地登录 shell")
+        profile = self.profiles.get(alias)
+        row.set_tooltip_text((f'{profile["username"]}@{profile["host"]} · 端口 {profile["port"]}')
+                             if profile else "ssh " + alias if alias else "本地登录 shell")
         self.rows[alias] = row
         self.server_list.add(row)
         row.show_all()
 
     def add_dialog(self):
-        dialog = Gtk.Dialog(title="添加 SSH 别名", transient_for=self, modal=True)
-        self.interface_style.attach(dialog)
-        dialog.add_buttons("取消", Gtk.ResponseType.CANCEL, "保存", Gtk.ResponseType.OK)
-        dialog.set_default_response(Gtk.ResponseType.OK)
-        content = dialog.get_content_area()
-        content.set_spacing(12)
-        content.set_border_width(16)
-        content.add(Gtk.Label(label="输入 ~/.ssh/config 中的 Host 别名，例如 dev-server。\n连接将使用系统 SSH 配置中的用户、端口和密钥。", xalign=0))
-        entry = Gtk.Entry(placeholder_text="SSH 别名", activates_default=True)
-        content.add(entry)
-        error_label = Gtk.Label(xalign=0)
-        content.add(error_label)
-        dialog.show_all()
-        while dialog.run() == Gtk.ResponseType.OK:
-            alias = entry.get_text().strip()
-            if not valid_alias(alias):
-                error_label.set_text("请使用字母、数字、下划线、点或连字符，且不要以连字符开头。")
-                continue
-            if alias in self.aliases:
-                error_label.set_text("该别名已存在。")
-                continue
-            if self.persist(self.aliases + [alias]):
-                self.add_row(alias)
-                break
-        dialog.destroy()
-
-    def import_aliases(self):
-        try:
-            found = discover_aliases()
-        except (OSError, UnicodeError) as error:
-            self.info("导入失败", str(error))
-            return
-        added = [alias for alias in found if alias not in self.aliases]
-        if not added:
-            self.info("没有新别名", "未找到可导入的新 Host 别名；通配符不会导入。也可以点击“添加服务器”手动保存。")
-            return
-        if self.persist(self.aliases + added):
-            for alias in added:
-                self.add_row(alias)
-            self.info("导入完成", f"已添加 {len(added)} 个 SSH 别名。点击左侧服务器进行连接。")
+        return ServerDialog(self)
 
     def selected(self, widget, row):
         if row is None:
@@ -846,7 +953,7 @@ class Window(Gtk.ApplicationWindow):
         return session
 
     def update_server_title(self):
-        title = "zTerm" if self.current is None else self.current or "本地终端"
+        title = "zTerm" if self.current is None else self.display_name(self.current)
         self.header.set_title(title)
         self.set_title(title)
 
@@ -862,10 +969,20 @@ class Window(Gtk.ApplicationWindow):
         notebook = self.groups.get(alias)
         sessions = notebook.get_children() if notebook else []
         if any(session.active for session in sessions) and not self.confirm(
-                "移除服务器并关闭会话？", f"{alias} 的所有活动会话都会关闭。"):
+                "移除服务器并关闭会话？", f"{self.display_name(alias)} 的所有活动会话都会关闭。"):
             return
+        profile = self.profiles.get(alias)
         if not self.persist([item for item in self.aliases if item != alias]):
             return
+        if profile and profile.get("password_saved"):
+            def clear_secret():
+                try:
+                    credentials.delete_password(alias)
+                except Exception:
+                    if not self.quota_closed:
+                        GLib.idle_add(self.info, "钥匙环条目未移除",
+                                      "请在系统“密码和密钥”中移除 zTerm · " + profile["name"] + "。")
+            threading.Thread(target=clear_secret, daemon=True).start()
         # Deselect before removing the row: GTK may otherwise select a neighbour.
         self.server_list.unselect_all()
         self.current = None

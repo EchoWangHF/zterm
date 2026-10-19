@@ -3,7 +3,7 @@
 set -eu
 umask 022
 source_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
-version=${1:-0.2.3}
+version=${1:-0.2.4}
 dpkg --validate-version "$version"
 case "$version" in
     *[!0-9A-Za-z.+:~\-]*) echo 'Invalid package version' >&2; exit 1 ;;
@@ -16,6 +16,7 @@ doc_dir="$stage/usr/share/doc/zterm"
 install -d "$stage/DEBIAN" "$stage/usr/bin" "$app_dir" "$doc_dir" \
     "$stage/usr/share/applications" "$stage/usr/share/icons/hicolor/scalable/apps"
 install -m 644 "$source_dir/app.py" "$source_dir/model.py" "$source_dir/quota.py" "$source_dir/workbench.svg" "$app_dir/"
+install -m 755 "$source_dir/credentials.py" "$app_dir/"
 install -m 644 "$source_dir/README.md" "$source_dir/HELP.txt" "$source_dir/THEME_SOURCES.txt" \
     "$source_dir/LICENSE" "$source_dir/THIRD_PARTY_NOTICES.txt" "$doc_dir/"
 cat "$source_dir/THIRD_PARTY_NOTICES.txt" "$source_dir/LICENSE" > "$doc_dir/copyright"
@@ -50,7 +51,8 @@ Provides: ssh-workbench (= $version)
 Conflicts: ssh-workbench
 Replaces: ssh-workbench
 Maintainer: zhouyawei <185499624@qq.com>
-Depends: python3 (>= 3.9), python3-gi, gir1.2-gtk-3.0, gir1.2-vte-2.91, librsvg2-common, openssh-client
+Depends: python3 (>= 3.9), python3-gi, gir1.2-gtk-3.0, gir1.2-vte-2.91, gir1.2-secret-1, librsvg2-common, openssh-client
+Recommends: gnome-keyring
 Homepage: https://github.com/zhou411X/zterm
 Description: zTerm terminal with grouped SSH sessions
  Independent local and SSH terminal with a collapsible server sidebar,

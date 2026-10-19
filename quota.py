@@ -124,7 +124,7 @@ def codex_quota(timeout=15):
         process.stdout.close()
 
 
-def fetch(alias):
+def fetch(alias, profile=None):
     """Run the same read-only probe locally or over noninteractive SSH."""
     source = Path(__file__).read_text()
     bootstrap = ("import json,sys; p=json.load(sys.stdin); "
@@ -132,14 +132,20 @@ def fetch(alias):
                  "exec(compile(p['source'],'quota.py','exec'),"
                  "{'__name__':'__main__'})")
     command = [sys.executable, "-c", bootstrap]
+    environment = None
     if alias:
-        # Alias validation is shared with the terminal's OpenSSH entry point.
-        from model import ssh_command
-        command = ssh_command(alias)[:1] + ["-T", "-oBatchMode=yes", "-oConnectTimeout=5",
-                                           alias, "python3 -c " + shlex.quote(bootstrap)]
+        from model import ssh_command, server_ssh_command
+        ssh = server_ssh_command(profile) if profile else ssh_command(alias)
+        options = ["-T", "-oBatchMode=yes", "-oConnectTimeout=5"]
+        if profile and profile.get("password_saved"):
+            from credentials import ssh_environment
+            environment = dict(os.environ, **ssh_environment(alias, profile, background=True))
+            options = ["-T", "-oBatchMode=no", "-oConnectTimeout=5", "-oStrictHostKeyChecking=yes"]
+        command = ssh[:1] + options + ssh[1:] + [
+            "python3 -c " + shlex.quote(bootstrap)]
     try:
         result = subprocess.run(command, input=json.dumps({"source": source}),
-                                text=True, capture_output=True, timeout=25)
+                                text=True, capture_output=True, timeout=25, env=environment)
         if result.returncode:
             return {"error": "连接失败：需可用的免交互 SSH 登录和 Python 3" if alias else "额度查询程序失败"}
         value = json.loads(result.stdout)

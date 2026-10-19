@@ -10,6 +10,7 @@ install -m 644 "$source_dir/app.py" "$source_dir/model.py" "$source_dir/quota.py
     "$source_dir/HELP.txt" "$source_dir/THEME_SOURCES.txt" "$source_dir/workbench.svg" \
     "$source_dir/LICENSE" "$source_dir/THIRD_PARTY_NOTICES.txt" "$app_dir/"
 install -m 644 "$source_dir/workbench.svg" "$icon_dir/scalable/apps/local.ssh.Workbench.svg"
+install -m 755 "$source_dir/credentials.py" "$app_dir/"
 # The launcher resolves XDG_DATA_HOME at runtime, including paths with spaces.
 cat > "$bin_dir/ssh-workbench" <<'LAUNCHER'
 #!/bin/sh
