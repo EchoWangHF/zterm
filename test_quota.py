@@ -72,6 +72,16 @@ class QuotaTests(unittest.TestCase):
         with patch("quota.subprocess.run", return_value=result):
             self.assertNotIn("private", str(quota.fetch("dev-server")))
 
+    def test_remote_probe_preserves_resolved_ssh_login(self):
+        result = subprocess.CompletedProcess([], 0, '{"codex":{"message":"未登录"}}', '')
+        resolved = ["/usr/bin/ssh", "-l", "zhouyawei", "-o", "HostName=192.0.2.24", "dev-server"]
+        with patch("model.ssh_command", return_value=resolved), \
+                patch("quota.subprocess.run", return_value=result) as run:
+            self.assertIn("codex", quota.fetch("dev-server"))
+            command = run.call_args.args[0]
+            self.assertEqual(command[4:-1], resolved[1:])
+            self.assertIn("-oBatchMode=yes", command)
+
     def test_remote_bootstrap_probe_with_isolated_home(self):
         # Execute the exact remote shell command, replacing only SSH transport.
         # No real SSH connection, account credentials or CLI is used.
@@ -88,6 +98,24 @@ class QuotaTests(unittest.TestCase):
                 with patch("quota.subprocess.run", side_effect=fake_transport):
                     result = quota.fetch("dev-server")
                     self.assertEqual(result["codex"]["message"], "未安装 CLI")
+
+    def test_explicit_profile_is_shared_with_password_quota_connection(self):
+        result = subprocess.CompletedProcess([], 0, '{"codex":{"message":"未登录"}}', '')
+        profile = {"name": "开发服务器", "host": "192.0.2.10", "username": "zhouyawei",
+                   "port": 2222, "password_saved": True}
+        with patch("model.ssh_command") as legacy, \
+                patch("quota.subprocess.run", return_value=result) as run:
+            self.assertIn("codex", quota.fetch("server-one", profile))
+            legacy.assert_not_called()
+            command = run.call_args.args[0]
+            self.assertEqual(command[command.index("-l") + 1], "zhouyawei")
+            self.assertEqual(command[command.index("-p") + 1], "2222")
+            self.assertEqual(command[-2], "192.0.2.10")
+            self.assertIn("-oStrictHostKeyChecking=yes", command)
+            self.assertNotIn("-oBatchMode=yes", command)
+            env = run.call_args.kwargs["env"]
+            self.assertEqual(env["ZTERM_SERVER_ID"], "server-one")
+            self.assertEqual(env["ZTERM_SSH_BACKGROUND"], "1")
 
 
 

@@ -1,6 +1,6 @@
-"""Saved SSH aliases. Connection options remain owned by OpenSSH."""
+"""Saved aliases and appearance, with static shell SSH alias resolution."""
 
-import glob
+import ipaddress
 import json
 import os
 from pathlib import Path
@@ -13,52 +13,113 @@ def valid_alias(alias):
     return bool(re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", alias))
 
 
-def discover_aliases(config=None):
-    """Discover literal Host names, including files referenced by Include.
+def parse_ssh_alias(command):
+    """Read a direct SSH invocation, without evaluating shell syntax."""
+    if "$" in command or "`" in command:
+        return None
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    try:
+        args = list(lexer)
+    except ValueError:
+        return None
+    if not args or args[0] not in ("ssh", "/usr/bin/ssh"):
+        return None
+    options, user, host = [], None, None
+    index = 1
+    while index < len(args):
+        arg = args[index]
+        if arg in ("-4", "-6", "-C"):
+            options.append(arg)
+        elif arg[:2] in ("-l", "-p", "-i", "-J", "-o"):
+            option = arg[:2]
+            value = arg[2:]
+            if not value:
+                index += 1
+                if index == len(args):
+                    return None
+                value = args[index]
+            if option == "-l":
+                user = value
+            elif option == "-o":
+                pair = re.split(r"[=\s]+", value, maxsplit=1)
+                if len(pair) != 2:
+                    return None
+                key, value = pair
+                key = key.lower()
+                if key == "user":
+                    user = value
+                elif key == "hostname":
+                    host = value
+                elif key in ("serveraliveinterval", "serveralivecountmax", "connecttimeout",
+                             "port", "identityfile", "identitiesonly", "proxyjump"):
+                    options.extend(["-o", key + "=" + value])
+                else:
+                    return None
+            else:
+                options.extend([option, str(Path(value).expanduser()) if option == "-i" else value])
+        else:
+            if index != len(args) - 1:
+                return None
+            login, separator, destination = arg.rpartition("@")
+            if separator:
+                user = login
+            host = host or destination
+            if not valid_alias(host) or (user is not None and not valid_alias(user)):
+                return None
+            return {"host": host, "user": user, "options": options}
+        index += 1
+    return None
 
-    This is a name index only; OpenSSH evaluates all connection options.
-    """
-    config = Path(config or Path.home() / ".ssh/config")
-    aliases, visited = [], set()
 
-    def visit(path):
-        path = path.resolve()
-        if path in visited:
-            return
-        visited.add(path)
+def bash_ssh_aliases(path=None):
+    path = Path(path) if path is not None else Path.home() / ".bashrc"
+    try:
+        lines = path.read_text().splitlines()
+    except FileNotFoundError:
+        return {}
+    aliases = {}
+    for line in lines:
         try:
-            lines = path.read_text().splitlines()
-        except FileNotFoundError:
-            return
-        for line in lines:
-            # OpenSSH accepts both "Host foo" and "Host=foo".
-            line = re.sub(r"^(\s*[A-Za-z]+)\s*=\s*", r"\1 ", line)
-            try:
-                parts = shlex.split(line, comments=True)
-            except ValueError:
-                continue
-            if not parts:
-                continue
-            if parts[0].lower() == "host":
-                for alias in parts[1:]:
-                    if valid_alias(alias) and alias not in aliases:
-                        aliases.append(alias)
-            elif parts[0].lower() == "include":
-                for pattern in parts[1:]:
-                    pattern = Path(pattern).expanduser()
-                    if not pattern.is_absolute():
-                        pattern = config.parent / pattern
-                    for match in sorted(glob.glob(str(pattern))):
-                        visit(Path(match))
-
-    visit(config)
+            parts = shlex.split(line, comments=True)
+        except ValueError:
+            continue
+        if not parts or parts[0] != "alias":
+            continue
+        for definition in parts[1:]:
+            name, separator, command = definition.partition("=")
+            if separator and valid_alias(name):
+                # A later redefinition supersedes an earlier supported SSH alias.
+                aliases.pop(name, None)
+                target = parse_ssh_alias(command)
+                if target is not None:
+                    aliases[name] = target
     return aliases
+
+
+def validate_server(profile):
+    if (not isinstance(profile, dict)
+            or not {"name", "host", "username", "port"}.issubset(profile)
+            or set(profile) - {"name", "host", "username", "port", "password_saved"}
+            or not isinstance(profile["name"], str) or not 1 <= len(profile["name"].strip()) <= 80
+            or any(ord(char) < 32 or ord(char) == 127 for char in profile["name"])
+            or not isinstance(profile["host"], str)
+            or not isinstance(profile["username"], str) or not valid_alias(profile["username"])
+            or type(profile["port"]) is not int or not 1 <= profile["port"] <= 65535
+            or type(profile.get("password_saved", False)) is not bool):
+        raise ValueError("服务器信息无效：请填写别名、IP、用户名和 1–65535 的端口。")
+    try:
+        ipaddress.ip_address(profile["host"])
+    except ValueError:
+        raise ValueError("请输入有效的 IPv4 或 IPv6 地址。") from None
+    return dict(profile)
 
 
 class AliasStore:
     def __init__(self, path=None):
         root = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
         self.path = Path(path) if path else root / "ssh-workbench/servers.json"
+        self.profiles = {}
 
     def load(self):
         if not self.path.exists():
@@ -69,10 +130,20 @@ class AliasStore:
                 or any(not isinstance(a, str) or not valid_alias(a) for a in aliases)
                 or len(set(aliases)) != len(aliases)):
             raise ValueError("别名配置格式错误；请检查 " + str(self.path))
+        profiles = data.get("servers", {})
+        if not isinstance(profiles, dict) or set(profiles) - set(aliases):
+            raise ValueError("服务器配置格式错误；请检查 " + str(self.path))
+        self.profiles = {key: validate_server(profile) for key, profile in profiles.items()}
         return aliases
 
-    def save(self, aliases):
-        save_json(self.path, {"aliases": aliases})
+    def save(self, aliases, profiles=None):
+        profiles = self.profiles if profiles is None else profiles
+        profiles = {key: validate_server(profiles[key]) for key in aliases if key in profiles}
+        data = {"aliases": aliases}
+        if profiles:
+            data["servers"] = profiles
+        save_json(self.path, data)
+        self.profiles = profiles
 
 
 def save_json(path, data):
@@ -223,7 +294,27 @@ class AppearanceStore:
         save_json(self.path, self.validate(data))
 
 
-def ssh_command(alias):
+def ssh_command(alias, bashrc=None):
     if not valid_alias(alias):
         raise ValueError("无效的 SSH 别名")
-    return ["/usr/bin/ssh", alias]
+    aliases = bash_ssh_aliases(bashrc)
+    target = aliases.get(alias)
+    if target is None:
+        target = next((value for value in aliases.values() if value["host"] == alias), None)
+    command = ["/usr/bin/ssh"]
+    if target is not None:
+        if target["user"]:
+            command.extend(["-l", target["user"]])
+        # Retain the original alias for SSH Host rules while resolving its target.
+        command.extend(["-o", "HostName=" + target["host"], *target["options"]])
+    return command + [alias]
+
+
+def server_ssh_command(profile):
+    profile = validate_server(profile)
+    command = ["/usr/bin/ssh", "-l", profile["username"], "-p", str(profile["port"]),
+               "-o", "HostName=" + profile["host"]]
+    if profile.get("password_saved"):
+        command += ["-oBatchMode=no", "-oPreferredAuthentications=publickey,password",
+                    "-oNumberOfPasswordPrompts=1"]
+    return command + [profile["host"]]

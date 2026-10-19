@@ -4,9 +4,10 @@ zterm 项目的应用显示名为 **zTerm**，是基于 Python、GTK 3 和 VTE �
 
 [下载 deb 安装包](https://github.com/zhou411X/zterm/releases/latest) · [GPL-3.0 许可证](LICENSE)
 
-- 保存或导入 SSH 别名，连接选项由系统 OpenSSH 和 `~/.ssh/config` 管理。
+- 添加服务器时填写显示别名、IP、用户名、密码和端口（默认 22）；侧栏和窗口标题显示别名。密码存入系统钥匙环，留空使用密钥登录。
 - 每个服务器拥有独立会话标签，切换服务器保留连接；支持重连及关闭确认。
 - 加宽会话标签将序号与右侧关闭按钮放在同一个标签内；新建“+”紧随最后一个标签，支持拖动排序和横向滚动。
+- 标签编号始终按从左到右的位置更新，拖拽或关闭后连续排列；`Alt+1 … 9` 对应显示编号。
 - 窗口标题随当前服务器切换；统一底栏左侧显示服务器与当前会话状态，离线后可直接重连，中间显示 Codex 订阅额度。
 - 设置字体、字号、文字、背景及光标颜色，预览后保存并应用到所有会话。
 - 应用界面主题覆盖标题栏、侧栏、标签、底栏和菜单；可跟随终端配色、独立搭配 14 套明暗配色，或跟随系统外观，支持预览、取消恢复及保存。
@@ -20,17 +21,17 @@ zterm 项目的应用显示名为 **zTerm**，是基于 Python、GTK 3 和 VTE �
 需要图形桌面环境；其他 Debian / Ubuntu 版本尚未逐一验证。
 
 从 [Releases](https://github.com/zhou411X/zterm/releases) 下载
-`zterm_0.2.3_all.deb`，进入下载目录后安装：
+`zterm_0.2.4_all.deb`，进入下载目录后安装：
 
 ```sh
-sudo apt install ./zterm_0.2.3_all.deb
+sudo apt install ./zterm_0.2.4_all.deb
 /usr/bin/zterm
 ```
 
 也支持 `dpkg -i`；如果提示缺少依赖，随后用 apt 补齐：
 
 ```sh
-sudo dpkg -i ./zterm_0.2.3_all.deb
+sudo dpkg -i ./zterm_0.2.4_all.deb
 # 仅当上一步报告缺少依赖时执行：
 sudo apt --fix-broken install
 ```
@@ -45,7 +46,7 @@ sudo apt --fix-broken install
 
 ```sh
 sudo apt update
-sudo apt install git python3 python3-gi gir1.2-gtk-3.0 gir1.2-vte-2.91 librsvg2-common openssh-client
+sudo apt install git python3 python3-gi gir1.2-gtk-3.0 gir1.2-vte-2.91 gir1.2-secret-1 gnome-keyring librsvg2-common openssh-client
 git clone https://github.com/zhou411X/zterm.git
 cd zterm
 /usr/bin/python3 app.py
@@ -61,7 +62,16 @@ sh install.sh
 
 用户级安装文件位于 `${XDG_DATA_HOME:-~/.local/share}/ssh-workbench/`，
 设置位于 `${XDG_CONFIG_HOME:-~/.config}/ssh-workbench/`。服务器别名和外观分别保存在
-`servers.json` 和 `appearance.json`；SSH 密钥、用户、端口等仍由 OpenSSH 配置管理。
+`servers.json` 和 `appearance.json`。在“设置 → 添加服务器”中指定 IPv4/IPv6 地址、用户名和端口，
+显示别名留空时使用 IP；这些连接字段优先于 `~/.ssh/config`。密钥和跳板等其他设置仍由 OpenSSH 管理。
+若 `.bashrc` 的静态 SSH 别名中只有一个登录用户名，表单自动预填该用户，可自行修改。
+已有版本保存的服务器继续保留：按别名或 IP 匹配 `.bashrc` 的直接 SSH 命令，
+优先采用其中明确指定的用户和连接选项；不执行 `.bashrc` 或复杂 shell 命令。
+
+填写的密码通过 libsecret 保存在系统钥匙环，配置文件、SSH 参数和环境变量中均不包含密码。
+保存密码需要桌面 Secret Service（如 GNOME Keyring）；钥匙环不可用时会提示保存失败。
+SSH 仍先尝试密钥，再通过 askpass 读取保存的密码；首次连接需要确认服务器主机密钥。
+移除服务器也会清除对应钥匙环条目，不修改 `.bashrc` 或 `.ssh/config`。
 
 从 SSH 工作台升级：应用现名 zTerm，启动命令为 `zterm`；旧命令 `ssh-workbench`
 仍可使用。沿用原来的数据目录、配置目录和桌面入口标识，服务器列表和外观设置无需迁移。
@@ -74,12 +84,12 @@ deb 包名从 `ssh-workbench` 改为 `zterm`，安装新版时替换旧包。
 ```sh
 sudo apt install dpkg
 # Python 语法编译检查；不会生成本机架构专用的可执行程序。
-/usr/bin/python3 -m py_compile app.py model.py quota.py
+/usr/bin/python3 -m py_compile app.py model.py credentials.py quota.py
 sh build_deb.sh
-sudo apt install ./dist/zterm_0.2.3_all.deb
+sudo apt install ./dist/zterm_0.2.4_all.deb
 ```
 
-可通过 `sh build_deb.sh 0.2.4` 指定版本。安装包为 `Architecture: all`，
+可通过 `sh build_deb.sh 0.2.5` 指定版本。安装包为 `Architecture: all`，
 包含 Python 源码、桌面入口和图标，运行依赖由 apt 安装。
 系统版启动命令为 `/usr/bin/zterm`，程序放在 `/usr/share/ssh-workbench/`，
 文档放在 `/usr/share/doc/zterm/`，继续使用原有用户配置。
@@ -94,9 +104,10 @@ sudo apt install ./dist/zterm_0.2.3_all.deb
 ## Codex 订阅额度
 
 底栏对应当前选中机器上的 CLI 账号，后台每 5 分钟查询，也可手动刷新。
-远端需要 Python 3.9+ 和免交互 SSH 登录（如密钥或 SSH agent），不会向终端注入命令。
+远端需要 Python 3.9+，可使用密钥、SSH agent 或已存入解锁钥匙环的密码，不会向终端注入命令。
+先在终端会话中确认主机密钥；后台不会弹出主机确认、钥匙环解锁或密码输入窗口。
 Codex 使用已登录 CLI 的官方 [account/rateLimits/read](https://learn.chatgpt.com/docs/app-server) 接口。
-不读取或传输登录凭据，不修改远端 CLI 配置。悬停可查看数据时间；
+不读取或传输 Codex 登录凭据，不修改远端 CLI 配置。悬停可查看数据时间；
 暂无数据或已过重置点时不会显示虚假的 0%。显示范围为 Codex 主/次额度，
 模型专属额度及额外付费用量不在此范围。连接要求详见 [HELP.txt](HELP.txt)。
 
@@ -106,13 +117,15 @@ Codex 使用已登录 CLI 的官方 [account/rateLimits/read](https://learn.chat
 
 ```sh
 sudo apt install xvfb xauth
-/usr/bin/python3 -m py_compile app.py model.py quota.py test_workbench.py test_quota.py
+/usr/bin/python3 -m py_compile app.py model.py credentials.py quota.py test_workbench.py test_quota.py test_credentials.py
+/usr/bin/python3 test_credentials.py
 /usr/bin/python3 test_quota.py
 GDK_BACKEND=x11 xvfb-run -a /usr/bin/python3 test_workbench.py
 ```
 
-测试涵盖配置保存、SSH 参数、PTY 输入输出、会话切换和回收、外观保存恢复，
-以及 14 套主题的实际 ANSI/前景/背景色块渲染、旧主题配置迁移、界面主题预览/保存/窗口隔离、标签布局/排序/溢出滚动和统一底栏状态/重连。
+测试涵盖服务器表单、旧配置兼容、密码保存失败回滚、askpass 目标匹配、SSH 用户/IP/端口覆盖、
+配置保存、PTY 输入输出、会话切换和回收、外观保存恢复，
+以及 14 套主题的实际 ANSI/前景/背景色块渲染、旧主题配置迁移、界面主题预览/保存/窗口隔离、标签布局/排序/溢出滚动、重排编号与 Alt 快捷键对应和统一底栏状态/重连。
 “在线”依据当前会话进程状态；真实 SSH 断网场景尚未验证。
 截图是测试生成物，不纳入版本控制。
 

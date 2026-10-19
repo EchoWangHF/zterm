@@ -8,10 +8,66 @@ import time
 import unittest
 
 from model import (AliasStore, AppearanceStore, THEMES, default_appearance, interface_colors,
-                   discover_aliases, ssh_command, valid_alias)
+                   bash_ssh_aliases, ssh_command, server_ssh_command, validate_server, valid_alias)
+
+
+def pump_until(predicate, timeout=5):
+    from app import Gtk
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        while Gtk.events_pending():
+            Gtk.main_iteration_do(False)
+        if predicate():
+            return
+        time.sleep(0.005)
+    raise AssertionError("GTK callback did not complete before timeout")
 
 
 class ModelTests(unittest.TestCase):
+    def test_server_profiles_roundtrip_and_validation(self):
+        profile = {"name": "开发服务器 A", "host": "192.0.2.10", "username": "zhouyawei",
+                   "port": 22, "password_saved": True}
+        with tempfile.TemporaryDirectory() as directory:
+            store = AliasStore(Path(directory) / "servers.json")
+            store.save(["old-alias", "server-one"], {"server-one": profile})
+            restored = AliasStore(store.path)
+            self.assertEqual(restored.load(), ["old-alias", "server-one"])
+            self.assertEqual(restored.profiles, {"server-one": profile})
+            before = store.path.read_bytes()
+            for invalid in ({"host": "hostname"}, {"host": "999.1.1.1"}, {"port": 0},
+                            {"port": 65536}, {"port": True}, {"username": "-root"},
+                            {"username": "user;command"}, {"name": "\n"}, {"name": "a" * 81},
+                            {"password": "must-not-be-written"}):
+                with self.assertRaises(ValueError):
+                    store.save(["old-alias", "server-one"], {"server-one": dict(profile, **invalid)})
+                self.assertEqual(store.path.read_bytes(), before)
+            self.assertEqual(validate_server(dict(profile, host="2001:db8::1"))["host"], "2001:db8::1")
+            restored.save(["old-alias"])
+            self.assertEqual(json.loads(store.path.read_text()), {"aliases": ["old-alias"]})
+
+    def test_explicit_server_user_ip_and_port_override_ssh_config(self):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "config"
+            config.write_text("Host *\n User cambricon\n HostName 192.0.2.99\n Port 2200\n"
+                              " IdentityFile /tmp/example-key\n BatchMode yes\n")
+            for host, port in (("192.0.2.10", 22), ("2001:db8::1", 2222)):
+                profile = {"name": "仅作显示", "host": host, "username": "zhouyawei", "port": port,
+                           "password_saved": True}
+                command = server_ssh_command(profile)
+                result = subprocess.run(command[:1] + ["-G", "-F", str(config)] + command[1:],
+                                        capture_output=True, text=True, check=True)
+                options = dict(line.split(" ", 1) for line in result.stdout.splitlines())
+                self.assertEqual(options["user"], "zhouyawei")
+                self.assertEqual(options["hostname"], host)
+                self.assertEqual(options["port"], str(port))
+                self.assertEqual(options["identityfile"], "/tmp/example-key")
+                self.assertEqual(options["batchmode"], "no")
+                self.assertEqual(options["preferredauthentications"], "publickey,password")
+                self.assertNotIn(profile["name"], command)
+
     def test_gnome_presets_match_source_colors(self):
         expected = {
             "gnome-black-on-light-yellow": ("#000000", "#ffffdd"),
@@ -99,13 +155,45 @@ class ModelTests(unittest.TestCase):
                 AliasStore(path).load()
             self.assertIn("ProxyCommand", path.read_text())
 
-    def test_includes_cycles_comments_and_wildcards(self):
+    def test_bashrc_login_user_overrides_ssh_config_for_alias_and_ip(self):
+        import subprocess
+
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / "config").write_text('Host dev prod # names\nInclude hosts/*\nHost *.wild !excluded\nHost=third\n')
-            (root / "hosts").mkdir()
-            (root / "hosts/one").write_text('Host "included" dev\nInclude config\n')
-            self.assertEqual(discover_aliases(root / "config"), ["dev", "prod", "included", "third"])
+            bashrc = root / "bashrc"
+            bashrc.write_text("alias lab='ssh -o serveraliveinterval=60 zhouyawei@192.0.2.24'\n"
+                              "alias lab2='ssh -l zhouyawei -p2222 192.0.2.25'\n")
+            config = root / "config"
+            config.write_text("Host *\n User cambricon\n IdentityFile /tmp/example-key\n")
+            self.assertEqual(list(bash_ssh_aliases(bashrc)), ["lab", "lab2"])
+            for alias in ("lab", "192.0.2.24"):
+                command = ssh_command(alias, bashrc)
+                result = subprocess.run(command[:1] + ["-G", "-F", str(config)] + command[1:],
+                                        capture_output=True, text=True, check=True)
+                values = dict(line.split(" ", 1) for line in result.stdout.splitlines())
+                self.assertEqual(values["user"], "zhouyawei")
+                self.assertEqual(values["hostname"], "192.0.2.24")
+                self.assertEqual(values["serveraliveinterval"], "60")
+                self.assertIn("/tmp/example-key", result.stdout)
+            self.assertIn("2222", ssh_command("lab2", bashrc))
+            self.assertEqual(ssh_command("other", bashrc), ["/usr/bin/ssh", "other"])
+
+    def test_bashrc_aliases_are_static_and_never_execute_shell(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            bashrc = root / "bashrc"
+            marker = root / "should-not-exist"
+            bashrc.write_text(f"touch {marker}\n"
+                              f"alias evil='ssh user@host; touch {marker}'\n"
+                              f"alias substitution='ssh $(touch {marker})@host'\n"
+                              "alias command='ssh user@host reboot'\n"
+                              "alias unsafe='ssh -oProxyCommand=evil user@host'\n"
+                              "alias previous='ssh old@host'\nalias previous='echo replaced'\n"
+                              "alias good='ssh -o User=zhouyawei -o HostName=192.0.2.10 host'\n")
+            self.assertEqual(list(bash_ssh_aliases(bashrc)), ["good"])
+            self.assertEqual(ssh_command("good", bashrc),
+                             ["/usr/bin/ssh", "-l", "zhouyawei", "-o", "HostName=192.0.2.10", "good"])
+            self.assertFalse(marker.exists())
 
     def test_arguments_cannot_be_ssh_options_or_shell_commands(self):
         for alias in ["-F", "host;touch /tmp/x", "a b", "$(id)", "", "host\nname"]:
@@ -116,6 +204,168 @@ class ModelTests(unittest.TestCase):
 
 
 class TerminalTests(unittest.TestCase):
+    def test_tab_numbers_follow_positions_and_alt_shortcuts(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from app import Window, Gdk
+
+        with tempfile.TemporaryDirectory() as directory:
+            window = Window(store=AliasStore(Path(directory) / "servers.json"), enable_quota=False,
+                            command_factory=lambda _: ["/bin/cat"])
+            window.confirm = lambda *_: True
+            try:
+                window.server_list.select_row(window.rows[""])
+                second = window.new_session()
+                third = window.new_session()
+                group = window.groups[""]
+                first = group.get_nth_page(0)
+                sessions = [first, second, third]
+                pump_until(lambda: all(session.alive for session in sessions))
+                pids = [session.pid for session in sessions]
+
+                def assert_positions(expected):
+                    self.assertEqual(group.get_children(), expected)
+                    for position, session in enumerate(expected, 1):
+                        self.assertEqual(session.tab_title, f"[{position}]")
+                        self.assertTrue(session.tab_label.get_text().startswith(f"[{position}]"))
+                        self.assertTrue(session.tab_label.get_tooltip_text().startswith(f"[{position}]"))
+                        event = SimpleNamespace(state=Gdk.ModifierType.MOD1_MASK, keyval=ord(str(position)))
+                        self.assertTrue(window.key_pressed(window, event))
+                        self.assertIs(window.current_session(), session)
+
+                # Exercise the same drop callback as a mouse drag, using stable session identity.
+                data = SimpleNamespace(get_data=lambda: str(third.number).encode())
+                with patch("app.Gtk.drag_finish"):
+                    group.tab_dropped(group.tabs[first][1], object(), 0, 0, data, 0, 0, first)
+                assert_positions([third, first, second])
+                self.assertEqual([session.pid for session in sessions], pids)
+                self.assertTrue(all(session.alive for session in sessions))
+
+                # A second drag must still identify the original session after renumbering.
+                data = SimpleNamespace(get_data=lambda: str(first.number).encode())
+                with patch("app.Gtk.drag_finish"):
+                    group.tab_dropped(group.tabs[second][1], object(), 0, 0, data, 0, 0, second)
+                assert_positions([third, second, first])
+                window.close_session(second)
+                assert_positions([third, first])
+                fourth = window.new_session()
+                pump_until(lambda: fourth.alive)
+                assert_positions([third, first, fourth])
+                fourth.terminal.feed_child(b"\x04")
+                pump_until(lambda: not fourth.active)
+                group.reorder_child(fourth, 0)
+                assert_positions([fourth, third, first])
+                self.assertEqual(fourth.tab_label.get_text(), "[1] · 已结束")
+                window.command_factory = lambda _: ["/zterm-test-nonexistent-executable"]
+                failed = window.new_session()
+                pump_until(lambda: not failed.active)
+                group.reorder_child(failed, 1)
+                assert_positions([fourth, failed, third, first])
+                self.assertEqual(failed.tab_label.get_text(), "[2] · 失败")
+            finally:
+                window.close_window()
+                window.destroy()
+
+    def test_add_server_dialog_persists_display_and_connection_fields(self):
+        from unittest.mock import patch
+        from app import Window, Gtk
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = AliasStore(Path(directory) / "servers.json")
+            store.save(["legacy-server"])
+            window = Window(store=store, enable_quota=False, command_factory=lambda _: ["/bin/cat"])
+            window.confirm = lambda *_: True
+            try:
+                with patch("app.bash_ssh_aliases", return_value={"lab": {"user": "zhouyawei"}}):
+                    dialog = window.add_dialog()
+                self.assertEqual(dialog.port.get_value_as_int(), 22)
+                self.assertEqual(dialog.username.get_text(), "zhouyawei")
+                self.assertFalse(dialog.password.get_visibility())
+                dialog.host.set_text("not-an-ip")
+                dialog.response(Gtk.ResponseType.OK)
+                self.assertIn("IP", dialog.error_label.get_text())
+                self.assertEqual(window.aliases, ["legacy-server"])
+                dialog.host.set_text("192.0.2.10")
+                dialog.name.set_text("开发服务器")
+                dialog.port.set_value(2222)
+                with patch("app.credentials.save_password") as save:
+                    dialog.response(Gtk.ResponseType.OK)
+                    pump_until(lambda: dialog.closed)
+                    save.assert_not_called()
+                server_id = window.aliases[-1]
+                profile = window.profiles[server_id]
+                self.assertEqual(profile, {"name": "开发服务器", "host": "192.0.2.10",
+                                          "username": "zhouyawei", "port": 2222, "password_saved": False})
+                self.assertEqual(window.rows[server_id].get_child().get_text(), "开发服务器")
+                self.assertIn("zhouyawei@192.0.2.10", window.rows[server_id].get_tooltip_text())
+                self.assertEqual(window.default_command(server_id), server_ssh_command(profile))
+                window.server_list.select_row(window.rows[server_id])
+                pump_until(lambda: window.current_session().alive)
+                self.assertEqual(window.header.get_title(), "开发服务器")
+                self.assertEqual(window.connection_label.get_text(), "开发服务器 · 在线")
+                window.search.set_text("192.0.2.10")
+                window.server_list.invalidate_filter()
+                self.assertTrue(window.rows[server_id].get_child_visible())
+                self.assertFalse(window.rows["legacy-server"].get_child_visible())
+                restored = AliasStore(store.path)
+                self.assertEqual(restored.load(), window.aliases)
+                self.assertEqual(restored.profiles, window.profiles)
+                window.remove_alias()
+                self.assertEqual(store.load(), ["legacy-server"])
+                self.assertEqual(store.profiles, {})
+            finally:
+                window.close_window()
+                window.destroy()
+
+    def test_server_password_storage_failure_rollback_and_removal(self):
+        from unittest.mock import patch
+        from app import Window, Gtk
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = AliasStore(Path(directory) / "servers.json")
+            store.save([])
+            window = Window(store=store, enable_quota=False)
+            dialog = window.add_dialog()
+            dialog.host.set_text("192.0.2.10")
+            dialog.username.set_text("zhouyawei")
+            dialog.password.set_text("test-only-password")
+            try:
+                with patch("app.credentials.save_password", side_effect=RuntimeError("unavailable")):
+                    dialog.response(Gtk.ResponseType.OK)
+                    pump_until(lambda: not dialog.busy)
+                self.assertFalse(dialog.closed)
+                self.assertEqual(store.load(), [])
+                with patch("app.credentials.save_password") as save, \
+                        patch("app.credentials.delete_password") as delete, \
+                        patch.object(store, "save", side_effect=OSError("read only")):
+                    dialog.response(Gtk.ResponseType.OK)
+                    pump_until(lambda: not dialog.busy)
+                    delete.assert_called_once_with(save.call_args.args[0])
+                self.assertEqual(store.load(), [])
+                with patch("app.credentials.save_password") as save:
+                    dialog.response(Gtk.ResponseType.OK)
+                    pump_until(lambda: dialog.closed)
+                    server_id = window.aliases[0]
+                    save.assert_called_once_with(server_id, "192.0.2.10", "test-only-password")
+                self.assertNotIn("test-only-password", store.path.read_text())
+                self.assertTrue(store.profiles[server_id]["password_saved"])
+                self.assertEqual(store.profiles[server_id]["name"], "192.0.2.10")
+                duplicate = window.add_dialog()
+                duplicate.host.set_text("192.0.2.10")
+                duplicate.username.set_text("another-user")
+                duplicate.response(Gtk.ResponseType.OK)
+                self.assertIn("已存在", duplicate.error_label.get_text())
+                duplicate.destroy()
+                window.current = server_id
+                with patch("app.credentials.delete_password") as delete:
+                    window.remove_alias()
+                    pump_until(lambda: delete.called)
+                    delete.assert_called_once_with(server_id)
+                self.assertEqual(store.load(), [])
+            finally:
+                dialog.destroy()
+                window.destroy()
+
     def test_interface_theme_preview_is_scoped_and_persists(self):
         from app import AppearanceDialog, Window, rgba
         from gi.repository import GLib, Gtk
@@ -239,6 +489,7 @@ class TerminalTests(unittest.TestCase):
             page = Gtk.Box()
             page.number = counter
             page.tab_label = Gtk.Label(label=f"[{counter}]")
+            page.set_tab_position = lambda position: page.tab_label.set_text(f"[{position}]")
             page.terminal = Gtk.Entry()
             page.add(page.terminal)
             page.show_all()
@@ -261,7 +512,10 @@ class TerminalTests(unittest.TestCase):
                 right = row.translate_coordinates(group.tab_strip, row.get_allocated_width(), 0)[0]
                 return group.add_button.translate_coordinates(group.tab_strip, 0, 0)[0] - right
 
-            pump_until(lambda: 0 <= inline_gap() <= 6)
+            # Before GTK allocates the rows, their initial 1px sizes can also
+            # satisfy the gap check. Wait for actual layout before measuring.
+            pump_until(lambda: all(group.tabs[page][0].get_allocated_width() >= 160
+                                   for page in (first, second)) and 0 <= inline_gap() <= 6)
             self.assertLess(group.add_button.translate_coordinates(window, 0, 0)[0], 400)
             for page in (first, second):
                 row, select = group.tabs[page]
@@ -283,6 +537,7 @@ class TerminalTests(unittest.TestCase):
                 group.tab_dropped(group.tabs[first][1], object(), 0, 0, data, 0, 0, first)
                 self.assertTrue(finish.call_args.args[1])
             self.assertIs(group.get_nth_page(0), second)
+            self.assertEqual([page.tab_label.get_text() for page in group.get_children()], ["[1]", "[2]"])
             self.assertEqual(group.tab_strip.get_children(),
                              [group.tabs[second][0], group.tabs[first][0], group.add_button])
             pump_until(lambda: 0 <= inline_gap() <= 6)
@@ -305,6 +560,7 @@ class TerminalTests(unittest.TestCase):
             self.assertEqual(group.tab_strip.get_children(), [group.add_button])
             group.add_button.clicked()
             self.assertEqual(group.get_n_pages(), 1)
+            self.assertEqual(group.get_nth_page(0).tab_label.get_text(), "[1]")
         finally:
             window.destroy()
             while context.pending():
@@ -560,13 +816,13 @@ class TerminalTests(unittest.TestCase):
                 self.assertEqual(window.groups, {}, "Startup must not connect automatically")
                 menu_items = window.settings_menu.get_children()
                 self.assertEqual([item.get_label() for item in menu_items],
-                                 ["添加服务器", "导入别名", "快捷键", "外观设置", "订阅额度"])
-                for item, method in zip(menu_items[:3], ("add_dialog", "import_aliases", "show_shortcuts")):
+                                 ["添加服务器", "快捷键", "外观设置", "订阅额度"])
+                for item, method in zip(menu_items[:2], ("add_dialog", "show_shortcuts")):
                     with patch.object(window, method) as action:
                         item.activate()
                         action.assert_called_once_with()
                 with patch("app.AppearanceDialog") as appearance:
-                    menu_items[3].activate()
+                    menu_items[2].activate()
                     appearance.assert_called_once_with(window)
                 window.server_list.select_row(window.rows["dev-server"])
                 first = window.groups["dev-server"].get_nth_page(0)

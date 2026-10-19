@@ -4,21 +4,28 @@ zTerm
 命令行：~/.local/bin/zterm
 旧命令 ssh-workbench 仍可使用，原有服务器列表和外观配置继续保留。
 
-标题栏右上角“设置”包含“添加服务器”“导入别名”“快捷键”“外观设置”“订阅额度”。
-“设置 → 添加服务器”保存 SSH 别名，例如 dev-server。
-“设置 → 导入别名”读取 ~/.ssh/config 中明确的 Host 别名及 Include 文件。
-通配符规则不作为服务器导入，配置本身仍由 OpenSSH 完整解释。
+标题栏右上角“设置”包含“添加服务器”“快捷键”“外观设置”“订阅额度”。
+“设置 → 添加服务器”填写显示别名、IP 地址、用户名、密码和端口（默认 22）。
+IP 支持 IPv4/IPv6；用户名必填；显示别名留空时使用 IP，别名显示在侧栏和窗口标题。
+若 ~/.bashrc 的静态 SSH 别名中只有一个登录用户名，会自动预填，可自行修改。
+密码留空使用已有密钥登录；填写后保存到系统钥匙环，不写入 servers.json 或 SSH 参数。
+密码保存需要可用的 Secret Service（如 GNOME Keyring），钥匙环锁定时按系统提示解锁。
+新增服务器的 IP、用户名和端口以表单为准，密钥和跳板等其他设置仍由 OpenSSH 管理。
+旧版本已保存的服务器继续保留，按别名或目标 IP 匹配 ~/.bashrc 中的直接 SSH 命令，
+优先采用其中指定的用户和选项；不执行 .bashrc、变量展开或复杂 shell 命令。
+终端连接和 Codex 后台查询共用相同的连接配置。
 点击左侧服务器建立第一个会话；最后一个会话标签紧邻的“+”创建独立连接。
 标签按 [1] [2] + 顺序排列；标签过多时可横向滚动。
 每个标签加宽显示，序号与右侧“×”关闭按钮位于同一个标签内，减少误触。
 标签显示为 [1]、[2] 等序号。窗口标题显示当前服务器 IP 或 SSH 别名，随服务器切换。
+编号按从左到右的位置显示，拖拽、新建或关闭后自动连续更新；Alt+1 … 9 对应显示编号。
 本地会话标题为“本地终端”，欢迎页标题为“zTerm”。
 标题栏左侧按钮可收起/展开服务器栏，收起时保持现有连接。
 切换服务器时，之前打开的会话会继续运行。标签可拖动排序。
 会话结束后保留输出，可以点击“重新连接”。
 底部统一为一栏：左侧显示当前服务器及“在线”状态，离线时显示可点击的“重新连接”；
 本地会话结束时显示“重新打开”。状态随当前标签切换，悬停可查看退出码或启动失败原因。
-“移除服务器”仅移除工作台保存的别名，不修改 SSH 配置。
+“移除服务器”移除连接配置及对应钥匙环密码，不修改 SSH 配置。
 关闭活动会话、服务器或窗口时会提示确认。
 重启工作台会保留服务器列表，但不会自动恢复 SSH 连接。
 
@@ -40,13 +47,9 @@ zTerm
 保存外观会将各会话的临时字体缩放重置为 100%；之后仍可用快捷键缩放。
 “终端配色”改变终端内容区；“界面主题”独立控制应用外观。外观配置与服务器列表分别保存。
 
-SSH 连接使用 /usr/bin/ssh，用户名、密钥、端口、跳板机等均遵循
-系统 SSH 配置。密码和首次连接的主机确认直接在终端内处理。
-本应用不保存密码。若尚未定义别名，可自行在 ~/.ssh/config 添加：
-
-Host dev-server
-    HostName 192.0.2.10
-    User your-user
+SSH 连接使用 /usr/bin/ssh，优先使用密钥，保存过密码时再通过 askpass 从钥匙环读取。
+保存密码的会话通过独立窗口确认主机或输入密钥口令；没有保存密码时沿用终端交互。
+服务器密码仅提供给匹配目标用户名和 IP 的密码提示，不用于跳板机或密钥口令。
 
 别名列表：${XDG_CONFIG_HOME:-~/.config}/ssh-workbench/servers.json
 外观配置：${XDG_CONFIG_HOME:-~/.config}/ssh-workbench/appearance.json
@@ -64,19 +67,21 @@ Ctrl+加号 / 减号 / 0     放大 / 缩小 / 重置字体
 统一底栏中间显示当前机器 Codex 的已用比例和重置时间，切换服务器随之更新。
 查询在后台进行，每 5 分钟自动刷新；右侧 ↻ 可手动刷新，悬停查看数据时间。
 重置时间使用工作台所在机器的时区；已到重置时间的旧数据标记“待刷新”。
-远端需 Python 3.9+，SSH 使用 BatchMode，需要密钥/agent 等免交互登录。
-只使用密码登录的终端会话仍可正常工作，但独立的后台额度查询可能无法登录。
+远端需 Python 3.9+，使用密钥/agent，或已存入解锁钥匙环的密码。
+请先建立一次终端会话确认主机密钥，后台查询不会弹出登录或解锁提示。
 Codex：服务器需安装 codex CLI 并使用订阅账号登录；仅调用官方额度读取接口。
 未返回数据、未登录、网络失败均显示具体状态，不将缺失数据显示为 0%。
 额度仅覆盖官方提供的 Codex 主额度/次额度，不代表模型专属额度或 API 余额。
-工作台不读取或传输登录凭据，不会修改远端 CLI 配置。
+工作台不读取或传输 Codex 登录凭据，不会修改远端 CLI 配置。
 
 开发验证：
-/usr/bin/python3 -m py_compile app.py model.py quota.py test_workbench.py test_quota.py
+/usr/bin/python3 -m py_compile app.py model.py credentials.py quota.py test_workbench.py test_quota.py test_credentials.py
+/usr/bin/python3 test_credentials.py
 /usr/bin/python3 test_quota.py
 GDK_BACKEND=x11 xvfb-run -a /usr/bin/python3 test_workbench.py
 
-依赖：python3-gi、gir1.2-gtk-3.0、gir1.2-vte-2.91、openssh-client。
+依赖：python3-gi、gir1.2-gtk-3.0、gir1.2-vte-2.91、gir1.2-secret-1、openssh-client。
+保存密码需要桌面钥匙环服务，如 gnome-keyring。
 运行方式采用 GNOME VTE spawn_async：
 https://gnome.pages.gitlab.gnome.org/vte/gtk3/method.Terminal.spawn_async.html
 
