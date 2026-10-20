@@ -8,7 +8,8 @@ import time
 import unittest
 
 from model import (AliasStore, AppearanceStore, THEMES, default_appearance, interface_colors,
-                   bash_ssh_aliases, ssh_command, server_ssh_command, validate_server, valid_alias)
+                   SSH_KEEPALIVE, bash_ssh_aliases, ssh_command, server_ssh_command,
+                   validate_server, valid_alias)
 
 
 def pump_until(predicate, timeout=5):
@@ -176,7 +177,7 @@ class ModelTests(unittest.TestCase):
                 self.assertEqual(values["serveraliveinterval"], "60")
                 self.assertIn("/tmp/example-key", result.stdout)
             self.assertIn("2222", ssh_command("lab2", bashrc))
-            self.assertEqual(ssh_command("other", bashrc), ["/usr/bin/ssh", "other"])
+            self.assertEqual(ssh_command("other", bashrc), ["/usr/bin/ssh", *SSH_KEEPALIVE, "other"])
 
     def test_bashrc_aliases_are_static_and_never_execute_shell(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -192,7 +193,8 @@ class ModelTests(unittest.TestCase):
                               "alias good='ssh -o User=zhouyawei -o HostName=192.0.2.10 host'\n")
             self.assertEqual(list(bash_ssh_aliases(bashrc)), ["good"])
             self.assertEqual(ssh_command("good", bashrc),
-                             ["/usr/bin/ssh", "-l", "zhouyawei", "-o", "HostName=192.0.2.10", "good"])
+                             ["/usr/bin/ssh", "-l", "zhouyawei", "-o", "HostName=192.0.2.10",
+                              *SSH_KEEPALIVE, "good"])
             self.assertFalse(marker.exists())
 
     def test_arguments_cannot_be_ssh_options_or_shell_commands(self):
@@ -200,7 +202,36 @@ class ModelTests(unittest.TestCase):
             self.assertFalse(valid_alias(alias))
             with self.assertRaises(ValueError):
                 ssh_command(alias)
-        self.assertEqual(ssh_command("dev-one"), ["/usr/bin/ssh", "dev-one"])
+        self.assertEqual(ssh_command("dev-one"), ["/usr/bin/ssh", *SSH_KEEPALIVE, "dev-one"])
+
+    def test_ssh_commands_send_keepalive_every_60s(self):
+        profile = {"name": "开发服务器", "host": "192.0.2.10", "username": "zhouyawei",
+                   "port": 22, "password_saved": False}
+        keepalive = ["-o", "ServerAliveInterval=60", "-o", "ServerAliveCountMax=3"]
+
+        def contains(command):
+            return any(command[i:i + len(keepalive)] == keepalive
+                       for i in range(len(command) - len(keepalive) + 1))
+
+        # Saved-server and plain-alias paths both keep the connection alive.
+        self.assertTrue(contains(server_ssh_command(profile)))
+        self.assertTrue(contains(server_ssh_command(dict(profile, password_saved=True))))
+        self.assertTrue(contains(ssh_command("dev-server")))
+
+    def test_bashrc_alias_keepalive_overrides_default(self):
+        import subprocess
+
+        with tempfile.TemporaryDirectory() as directory:
+            bashrc = Path(directory) / "bashrc"
+            bashrc.write_text("alias lab='ssh -o ServerAliveInterval=30 zhouyawei@192.0.2.24'\n")
+            config = Path(directory) / "config"
+            config.write_text("")
+            command = ssh_command("lab", bashrc)
+            result = subprocess.run(command[:1] + ["-G", "-F", str(config)] + command[1:],
+                                    capture_output=True, text=True, check=True)
+            options = dict(line.split(" ", 1) for line in result.stdout.splitlines())
+            self.assertEqual(options["serveraliveinterval"], "30")
+            self.assertEqual(options["serveralivecountmax"], "3")
 
 
 class TerminalTests(unittest.TestCase):
@@ -265,6 +296,104 @@ class TerminalTests(unittest.TestCase):
                 window.server_list.invalidate_filter()
                 self.assertTrue(row.get_child_visible())
                 self.assertFalse(window.rows["server-b"].get_child_visible())
+            finally:
+                window.destroy()
+
+    def test_sidebar_has_persistent_add_edit_duplicate_buttons(self):
+        from unittest.mock import patch
+        from app import Window, Gtk
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = AliasStore(Path(directory) / "servers.json")
+            store.save(["server-a"], {"server-a": {"name": "开发服务器", "host": "192.0.2.10",
+                                                    "username": "zhouyawei", "port": 22,
+                                                    "password_saved": False}})
+            window = Window(store=store, enable_quota=False,
+                            command_factory=lambda _: ["/bin/cat"])
+            try:
+                # 侧栏顶部的“添加服务器”始终可见，且不再出现在“设置”菜单中。
+                pump_until(lambda: window.add_server_button.get_mapped())
+                self.assertTrue(window.add_server_button.get_visible())
+                self.assertNotIn("添加服务器", [item.get_label()
+                                              for item in window.settings_menu.get_children()])
+                with patch.object(window, "add_dialog") as add:
+                    window.add_server_button.clicked()
+                    add.assert_called_once_with()
+                # 未选中服务器时，编辑/复制/移除都不可用。
+                self.assertFalse(window.edit_button.get_sensitive())
+                self.assertFalse(window.duplicate_button.get_sensitive())
+                self.assertFalse(window.remove_button.get_sensitive())
+                # 选中服务器后点亮，点击分别触发对应动作。
+                window.server_list.select_row(window.rows["server-a"])
+                self.assertTrue(window.edit_button.get_sensitive())
+                self.assertTrue(window.duplicate_button.get_sensitive())
+                self.assertTrue(window.remove_button.get_sensitive())
+                with patch.object(window, "edit_dialog") as edit:
+                    window.edit_button.clicked()
+                    edit.assert_called_once_with("server-a")
+                # 本地终端行没有可编辑/复制的名字。
+                window.server_list.select_row(window.rows[""])
+                self.assertFalse(window.edit_button.get_sensitive())
+                self.assertFalse(window.duplicate_button.get_sensitive())
+                self.assertFalse(window.remove_button.get_sensitive())
+            finally:
+                window.destroy()
+
+    def test_duplicate_server_copies_saved_password(self):
+        from unittest.mock import patch
+        from app import Window, Gtk
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = AliasStore(Path(directory) / "servers.json")
+            store.save(["server-a"], {"server-a": {"name": "原服务器", "host": "192.0.2.10",
+                                                    "username": "zhouyawei", "port": 22,
+                                                    "password_saved": True}})
+            window = Window(store=store, enable_quota=False,
+                            command_factory=lambda _: ["/bin/cat"])
+            try:
+                with patch("credentials.lookup_password", return_value="test-only-password") as lookup, \
+                     patch("credentials.save_password") as save:
+                    window.duplicate_alias("server-a")
+                new_id = [alias for alias in window.aliases if alias != "server-a"][0]
+                self.assertEqual(window.aliases, ["server-a", new_id])
+                self.assertEqual(store.load(), window.aliases)
+                copy = window.profiles[new_id]
+                self.assertEqual(copy["name"], "原服务器 副本")
+                self.assertEqual(copy["host"], "192.0.2.10")
+                self.assertEqual(copy["username"], "zhouyawei")
+                self.assertEqual(copy["port"], 22)
+                self.assertTrue(copy["password_saved"])
+                self.assertEqual(copy["credential_id"], new_id)
+                self.assertIn(new_id, window.rows)
+                self.assertEqual(window.rows[new_id].alias, new_id)
+                lookup.assert_called_once_with("server-a")
+                save.assert_called_once_with(new_id, "原服务器 副本", "test-only-password")
+            finally:
+                window.destroy()
+
+    def test_duplicate_server_without_password_keeps_names_unique(self):
+        from unittest.mock import patch
+        from app import Window, Gtk
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = AliasStore(Path(directory) / "servers.json")
+            store.save(["server-a"], {"server-a": {"name": "原服务器", "host": "192.0.2.10",
+                                                    "username": "zhouyawei", "port": 22,
+                                                    "password_saved": False}})
+            window = Window(store=store, enable_quota=False,
+                            command_factory=lambda _: ["/bin/cat"])
+            try:
+                with patch("credentials.save_password") as save:
+                    window.duplicate_alias("server-a")
+                    window.duplicate_alias("server-a")
+                copies = [alias for alias in window.aliases if alias != "server-a"]
+                self.assertEqual(len(copies), 2)
+                self.assertEqual([window.profiles[alias]["name"] for alias in copies],
+                                 ["原服务器 副本", "原服务器 副本 2"])
+                for alias in copies:
+                    self.assertFalse(window.profiles[alias]["password_saved"])
+                    self.assertNotIn("credential_id", window.profiles[alias])
+                save.assert_not_called()
             finally:
                 window.destroy()
 
@@ -1239,15 +1368,21 @@ class TerminalTests(unittest.TestCase):
                 self.assertEqual(window.groups, {}, "Startup must not connect automatically")
                 menu_items = window.settings_menu.get_children()
                 self.assertEqual([item.get_label() for item in menu_items],
-                                 ["添加服务器", "快捷键", "外观设置", "订阅额度"])
-                for item, method in zip(menu_items[:2], ("add_dialog", "show_shortcuts")):
+                                 ["快捷键", "外观设置", "订阅额度"])
+                for item, method in zip(menu_items[:1], ("show_shortcuts",)):
                     with patch.object(window, method) as action:
                         item.activate()
                         action.assert_called_once_with()
                 with patch("app.AppearanceDialog") as appearance:
-                    menu_items[2].activate()
+                    menu_items[1].activate()
                     appearance.assert_called_once_with(window)
+                with patch.object(window, "add_dialog") as action:
+                    window.add_server_button.clicked()
+                    action.assert_called_once_with()
                 window.server_list.select_row(window.rows["dev-server"])
+                with patch.object(window, "edit_dialog") as edit:
+                    window.edit_button.clicked()
+                    edit.assert_called_once_with("dev-server")
                 first = window.groups["dev-server"].get_nth_page(0)
                 pump_until(lambda: first.alive and "READY" in output(first))
                 self.assertEqual(first.tab_label.get_text(), "[1]")
