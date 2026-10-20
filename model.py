@@ -299,6 +299,11 @@ class AppearanceStore:
         save_json(self.path, self.validate(data))
 
 
+# Keep idle SSH connections alive (equivalent to `ssh -o ServerAliveInterval=60`),
+# so NAT timeouts and firewalls do not silently drop the session.
+SSH_KEEPALIVE = ["-o", "ServerAliveInterval=60", "-o", "ServerAliveCountMax=3"]
+
+
 def ssh_command(alias, bashrc=None):
     if not valid_alias(alias):
         raise ValueError("无效的 SSH 别名")
@@ -312,13 +317,16 @@ def ssh_command(alias, bashrc=None):
             command.extend(["-l", target["user"]])
         # Retain the original alias for SSH Host rules while resolving its target.
         command.extend(["-o", "HostName=" + target["host"], *target["options"]])
+    # Keep the connection alive; these defaults come after any explicit
+    # ServerAlive* option from a .bashrc alias, which OpenSSH honours first.
+    command.extend(SSH_KEEPALIVE)
     return command + [alias]
 
 
 def server_ssh_command(profile):
     profile = validate_server(profile)
     command = ["/usr/bin/ssh", "-l", profile["username"], "-p", str(profile["port"]),
-               "-o", "HostName=" + profile["host"]]
+               "-o", "HostName=" + profile["host"], *SSH_KEEPALIVE]
     if profile.get("password_saved"):
         command += ["-oBatchMode=no", "-oPreferredAuthentications=publickey,password",
                     "-oNumberOfPasswordPrompts=1"]

@@ -761,8 +761,7 @@ class Window(Gtk.ApplicationWindow):
         self.settings_button = Gtk.MenuButton(label="设置")
         self.settings_menu = Gtk.Menu()
         self.interface_style.attach(self.settings_menu)
-        for label, callback in [("添加服务器", lambda _: self.add_dialog()),
-                                ("快捷键", lambda _: self.show_shortcuts()),
+        for label, callback in [("快捷键", lambda _: self.show_shortcuts()),
                                 ("外观设置", lambda _: AppearanceDialog(self)),
                                 ("订阅额度", lambda _: self.quota_settings())]:
             item = Gtk.MenuItem(label=label)
@@ -804,7 +803,11 @@ class Window(Gtk.ApplicationWindow):
         self.sidebar = side
         side.get_style_context().add_class("workspace-sidebar")
         side.set_size_request(170, -1)
-        side.pack_start(Gtk.Label(label="服务器", xalign=0), False, False, 4)
+        server_header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        server_header.pack_start(Gtk.Label(label="服务器", xalign=0), True, True, 0)
+        self.add_server_button = button("添加服务器", lambda _: self.add_dialog(), "新增服务器")
+        server_header.pack_end(self.add_server_button, False, False, 0)
+        side.pack_start(server_header, False, False, 4)
         self.search = Gtk.SearchEntry(placeholder_text="搜索别名或 IP")
         self.search.connect("search-changed", lambda _: self.server_list.invalidate_filter())
         side.pack_start(self.search, False, False, 0)
@@ -833,9 +836,17 @@ class Window(Gtk.ApplicationWindow):
         scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         scroll.add(self.server_list)
         side.pack_start(scroll, True, True, 0)
-        self.remove_button = button("移除服务器", lambda _: self.remove_alias())
+        self.remove_button = button("移除服务器", lambda _: self.remove_alias(), "移除所选服务器")
         self.remove_button.set_sensitive(False)
         side.pack_end(self.remove_button, False, False, 0)
+        self.duplicate_button = button("复制服务器", lambda _: self.duplicate_alias(),
+                                       "复制所选服务器及其已保存的密码")
+        self.duplicate_button.set_sensitive(False)
+        side.pack_end(self.duplicate_button, False, False, 0)
+        self.edit_button = button("编辑服务器", lambda _: self.edit_dialog(self.current),
+                                  "修改所选服务器的名称、IP、用户名、密码或端口")
+        self.edit_button.set_sensitive(False)
+        side.pack_end(self.edit_button, False, False, 0)
         pane.pack1(side, False, False)
         self.stack = Gtk.Stack()
         welcome = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
@@ -844,7 +855,7 @@ class Window(Gtk.ApplicationWindow):
         welcome.pack_start(Gtk.Image.new_from_pixbuf(
             self.get_icon().scale_simple(64, 64, GdkPixbuf.InterpType.BILINEAR)), False, False, 0)
         welcome.pack_start(Gtk.Label(label="你的服务器，一个工作台"), False, False, 0)
-        welcome.pack_start(Gtk.Label(label="在右上角“设置”中添加服务器。\n"
+        welcome.pack_start(Gtk.Label(label="点击左侧“添加服务器”新增服务器。\n"
                                     "选择服务器后，用最后一个标签后的 ＋ 打开更多会话。\n"
                                     "切换服务器会保留当前连接。", justify=Gtk.Justification.CENTER), False, False, 0)
         self.stack.add_named(welcome, "welcome")
@@ -1075,6 +1086,9 @@ class Window(Gtk.ApplicationWindow):
         item = Gtk.MenuItem(label="编辑服务器")
         item.connect("activate", lambda *_: self.edit_dialog(alias))
         menu.append(item)
+        duplicate = Gtk.MenuItem(label="复制服务器")
+        duplicate.connect("activate", lambda *_: self.duplicate_alias(alias))
+        menu.append(duplicate)
         menu.attach_to_widget(self.server_list, None)
         self.interface_style.attach(menu)
         menu.connect("selection-done", lambda *_: menu.destroy())
@@ -1162,7 +1176,10 @@ class Window(Gtk.ApplicationWindow):
         self.update_server_title()
         self.render_quota()
         self.refresh_quota()
-        self.remove_button.set_sensitive(bool(row.alias))
+        server_selected = bool(row.alias)
+        self.edit_button.set_sensitive(server_selected)
+        self.duplicate_button.set_sensitive(server_selected)
+        self.remove_button.set_sensitive(server_selected)
         if row.alias not in self.groups:
             notebook = SessionNotebook(self.new_session)
             notebook.connect_after("switch-page", self.session_switched, row.alias)
@@ -1234,10 +1251,66 @@ class Window(Gtk.ApplicationWindow):
             notebook.panel.destroy()
             del self.groups[alias]
         self.stack.set_visible_child_name("welcome")
+        self.edit_button.set_sensitive(False)
+        self.duplicate_button.set_sensitive(False)
         self.remove_button.set_sensitive(False)
         self.update_server_title()
         self.render_quota()
         self.render_status()
+
+    def duplicate_alias(self, alias=None):
+        alias = alias if alias is not None else self.current
+        profile = self.profiles.get(alias)
+        if not alias or alias not in self.aliases or not profile:
+            return
+        if self.load_error:
+            self.info("配置不可写入", "请先修复现有配置并重新启动，避免覆盖原有数据。\n" + self.load_error)
+            return
+        base_name = (profile["name"] + " 副本")[:80]
+        existing_names = {self.display_name(item) for item in self.aliases}
+        name = base_name
+        suffix = 2
+        while name in existing_names:
+            name = (f"{profile['name']} 副本 {suffix}")[:80]
+            suffix += 1
+        new_id = "server-" + uuid.uuid4().hex
+        new_profile = dict(profile, name=name, password_saved=False)
+        new_profile.pop("credential_id", None)
+        password_copied = False
+        if profile.get("password_saved"):
+            try:
+                password = credentials.lookup_password(profile.get("credential_id", alias))
+            except Exception:
+                password = None
+            if password is not None:
+                try:
+                    credentials.save_password(new_id, name, password)
+                    password_copied = True
+                except Exception:
+                    password_copied = False
+        if password_copied:
+            new_profile["password_saved"] = True
+            new_profile["credential_id"] = new_id
+        aliases = self.aliases + [new_id]
+        profiles = dict(self.profiles, **{new_id: new_profile})
+        try:
+            self.store.save(aliases, profiles)
+        except (OSError, ValueError) as error:
+            if password_copied:
+                def clear_copy():
+                    try:
+                        credentials.delete_password(new_id)
+                    except Exception:
+                        pass
+                threading.Thread(target=clear_copy, daemon=True).start()
+            self.info("保存失败", str(error))
+            return
+        self.aliases = aliases
+        self.profiles = dict(self.store.profiles)
+        self.add_row(new_id)
+        if profile.get("password_saved") and not password_copied:
+            self.info("密码未复制", "服务器已复制，但未能读取原密码。\n"
+                      "新条目请使用密钥登录，或选中后点击“编辑服务器”重新设置密码。")
 
     def close_window(self, *_):
         sessions = [session for group in self.groups.values() for session in group.get_children()]
